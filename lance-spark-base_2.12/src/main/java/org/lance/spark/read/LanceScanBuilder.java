@@ -72,7 +72,25 @@ public class LanceScanBuilder
         SupportsPushDownAggregates {
   private static final Logger LOG = LoggerFactory.getLogger(LanceScanBuilder.class);
 
+  /** Session switch that turns on two-phase month reads for every scan of this query. */
+  public static final String CONF_TWO_PHASE_MONTH_READ = "spark.lance.two_phase_month_read";
+
   private final LanceSparkReadOptions readOptions;
+
+  /**
+   * Reads the session-level two-phase month read switch. Catalog-resolved tables ignore the
+   * provider OPTIONS map, so a session configuration is the only way to enable it for
+   * {@code USING lance OPTIONS (catalog ...)} queries.
+   */
+  private static boolean twoPhaseMonthReadEnabled() {
+    scala.Option<org.apache.spark.sql.SparkSession> session =
+        org.apache.spark.sql.SparkSession.getActiveSession();
+    if (session.isEmpty()) {
+      return false;
+    }
+    return Boolean.parseBoolean(
+        session.get().conf().get(CONF_TWO_PHASE_MONTH_READ, "false"));
+  }
 
   /** Full table schema before column pruning; used to widen nested structs for vectorized reads. */
   private final StructType fullSchema;
@@ -254,6 +272,15 @@ public class LanceScanBuilder
       LanceSplit.ScanPlanResult scanPlan = LanceSplit.planScan(dataset);
       LanceSparkReadOptions resolvedReadOptions =
           readOptions.withVersion(scanPlan.getResolvedVersion());
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(
+            "two-phase month read: conf={} option={}",
+            twoPhaseMonthReadEnabled(),
+            resolvedReadOptions.isTwoPhaseMonthRead());
+      }
+      if (!resolvedReadOptions.isTwoPhaseMonthRead() && twoPhaseMonthReadEnabled()) {
+        resolvedReadOptions = resolvedReadOptions.withTwoPhaseMonthRead(true);
+      }
 
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);

@@ -83,10 +83,20 @@
                         <configuration>
                             <finalName>${project.artifactId}-${project.version}</finalName>
                             <artifactSet>
+                                <includes>
+                                    <include>org.lance:lance-spark-base_2.12</include>
+                                    <include>org.lance:lance-spark-3.5_2.12</include>
+                                </includes>
                                 <excludes>
                                     <exclude>io.netty:*</exclude>
                                 </excludes>
                             </artifactSet>
+                            <relocations>
+                                <relocation>
+                                    <pattern>org.lance.spark</pattern>
+                                    <shadedPattern>org.lance.lakeread.spark</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer" />
@@ -100,6 +110,7 @@
                                         <exclude>META-INF/*.SF</exclude>
                                         <exclude>META-INF/*.DSA</exclude>
                                         <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/services/org.apache.spark.sql.sources.DataSourceRegister</exclude>
                                     </excludes>
                                 </filter>
                             </filters>

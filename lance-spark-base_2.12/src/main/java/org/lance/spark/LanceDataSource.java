@@ -83,7 +83,8 @@ public abstract class LanceDataSource implements SupportsCatalogOptions, DataSou
   @Override
   public Table getTable(
       StructType schema, Transform[] partitioning, Map<String, String> properties) {
-    return createDataset(LanceSparkReadOptions.from(properties), schema);
+    LanceSparkReadOptions options = LanceSparkReadOptions.from(properties);
+    return createDataset(options, schema);
   }
 
   @Override

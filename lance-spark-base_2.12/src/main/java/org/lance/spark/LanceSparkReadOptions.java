@@ -52,6 +52,7 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
+  public static final String CONFIG_TWO_PHASE_MONTH_READ = "two_phase_month_read";
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
   private static final String DEPRECATED_CONFIG_NEAREST = "nearest";
 
@@ -108,6 +109,7 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer metadataCacheSize;
   private final int batchSize;
   private final boolean useScalarIndex;
+  private final boolean twoPhaseMonthRead;
   private final boolean topNPushDown;
   private final Map<String, String> storageOptions;
 
@@ -138,6 +140,7 @@ public class LanceSparkReadOptions implements Serializable {
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
     this.useScalarIndex = builder.useScalarIndex;
+    this.twoPhaseMonthRead = builder.twoPhaseMonthRead;
     this.topNPushDown = builder.topNPushDown;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
@@ -254,6 +257,10 @@ public class LanceSparkReadOptions implements Serializable {
     return useScalarIndex;
   }
 
+  public boolean isTwoPhaseMonthRead() {
+    return twoPhaseMonthRead;
+  }
+
   public boolean isTopNPushDown() {
     return topNPushDown;
   }
@@ -314,6 +321,34 @@ public class LanceSparkReadOptions implements Serializable {
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
         .useScalarIndex(this.useScalarIndex)
+        .twoPhaseMonthRead(this.twoPhaseMonthRead)
+        .topNPushDown(this.topNPushDown)
+        .storageOptions(this.storageOptions)
+        .namespace(this.namespace)
+        .tableId(this.tableId)
+        .catalogName(this.catalogName)
+        .executorCredentialRefresh(this.executorCredentialRefresh)
+        .build();
+  }
+
+  /**
+   * Returns a copy of these options with the two-phase month read flag set.
+   *
+   * @param enabled whether month-filtered scans should read row IDs first and fetch the projection
+   *     afterwards
+   * @return a new LanceSparkReadOptions with the requested flag
+   */
+  public LanceSparkReadOptions withTwoPhaseMonthRead(boolean enabled) {
+    return builder()
+        .datasetUri(this.datasetUri)
+        .pushDownFilters(this.pushDownFilters)
+        .blockSize(this.blockSize)
+        .version(this.version)
+        .indexCacheSize(this.indexCacheSize)
+        .metadataCacheSize(this.metadataCacheSize)
+        .batchSize(this.batchSize)
+        .useScalarIndex(this.useScalarIndex)
+        .twoPhaseMonthRead(enabled)
         .topNPushDown(this.topNPushDown)
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
@@ -358,6 +393,7 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && useScalarIndex == that.useScalarIndex
+        && twoPhaseMonthRead == that.twoPhaseMonthRead
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
         && Objects.equals(datasetUri, that.datasetUri)
@@ -380,6 +416,7 @@ public class LanceSparkReadOptions implements Serializable {
         metadataCacheSize,
         batchSize,
         useScalarIndex,
+        twoPhaseMonthRead,
         topNPushDown,
         storageOptions,
         tableId,
@@ -396,6 +433,7 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
+    private boolean twoPhaseMonthRead = false;
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
@@ -442,6 +480,11 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder useScalarIndex(boolean useScalarIndex) {
       this.useScalarIndex = useScalarIndex;
+      return this;
+    }
+
+    public Builder twoPhaseMonthRead(boolean twoPhaseMonthRead) {
+      this.twoPhaseMonthRead = twoPhaseMonthRead;
       return this;
     }
 
@@ -539,6 +582,9 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
         this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));
+      }
+      if (opts.containsKey(CONFIG_TWO_PHASE_MONTH_READ)) {
+        this.twoPhaseMonthRead = Boolean.parseBoolean(opts.get(CONFIG_TWO_PHASE_MONTH_READ));
       }
       if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =

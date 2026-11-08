@@ -1,5 +1,17 @@
 # Configuration
 
+## Experimental bounded month reads
+
+The `two_phase_month_read` read option defaults to `false`. When enabled, eligible
+month filters first stream internal row IDs and then fetch projected columns in
+`batch_size` batches from the same dataset handle. It does not collect row IDs on
+the Spark driver. Metadata columns, blob references, nested projections and
+scans with pushed limits, offsets or ordering keep the original reader.
+
+Use a fixed `version` for repeatable scans. Native scan counters currently cover
+the filtering scan; they do not include all I/O performed by subsequent row-ID
+fetches and must not be used alone to claim an I/O improvement.
+
 Spark DSV2 catalog integrates with Lance through [Lance Namespace](https://github.com/lance-format/lance-namespace).
 
 ## Spark SQL Extensions

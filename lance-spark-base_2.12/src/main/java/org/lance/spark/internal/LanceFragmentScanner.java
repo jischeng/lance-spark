@@ -26,18 +26,30 @@ import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Collections;
 import java.util.Optional;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class LanceFragmentScanner implements AutoCloseable {
+  private static final Logger LOG = LoggerFactory.getLogger(LanceFragmentScanner.class);
+
   private final Dataset dataset;
   private final LanceScanner scanner;
   private final int fragmentId;
@@ -54,6 +66,7 @@ public class LanceFragmentScanner implements AutoCloseable {
 
   /** The names of blob columns in the projected schema. */
   private final Set<String> blobColumnNames;
+  private final boolean twoPhaseMonthRead;
 
   private LanceFragmentScanner(
       Dataset dataset,
@@ -64,7 +77,8 @@ public class LanceFragmentScanner implements AutoCloseable {
       long datasetOpenTimeNs,
       long scannerCreateTimeNs,
       boolean withRowAddrForBlobs,
-      Set<String> blobColumnNames) {
+      Set<String> blobColumnNames,
+      boolean twoPhaseMonthRead) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
@@ -74,6 +88,7 @@ public class LanceFragmentScanner implements AutoCloseable {
     this.scannerCreateTimeNs = scannerCreateTimeNs;
     this.withRowAddrForBlobs = withRowAddrForBlobs;
     this.blobColumnNames = blobColumnNames;
+    this.twoPhaseMonthRead = twoPhaseMonthRead;
   }
 
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
@@ -125,6 +140,42 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
 
       scanOptions.columns(projectedColumns);
+      List<String> filterColumns =
+          inputPartition.getWhereCondition().isPresent()
+              ? filterColumns(inputPartition.getWhereCondition().get(), dataset.getSchema())
+              : Collections.emptyList();
+      boolean twoPhaseMonthRead =
+          readOptions.isTwoPhaseMonthRead()
+              && inputPartition.getWhereCondition().isPresent()
+              && inputPartition.getWhereCondition().get().toLowerCase(Locale.ROOT).contains("month")
+              && !filterColumns.isEmpty()
+              && !projectedColumns.isEmpty()
+              && projectedColumns.stream()
+                  .noneMatch(name -> name.startsWith("_") || name.contains("."))
+              && Arrays.stream(scanSchema.fields())
+                  .noneMatch(field -> field.name().startsWith("_"))
+              && !hasBlobColumns
+              && !hasField(scanSchema, LanceConstant.FRAGMENT_ID)
+              && !inputPartition.getLimit().isPresent()
+              && !inputPartition.getOffset().isPresent()
+              && !inputPartition.getTopNSortOrders().isPresent();
+      if (twoPhaseMonthRead) {
+        scanOptions.columns(filterColumns);
+        scanOptions.withRowId(true);
+      }
+      LOG.debug(String.format(
+            "two-phase gate: enabled={} fragment={} where={} filterColumns={} projected={} blobs={} fragId={} limit={} offset={} topN={}",
+            readOptions.isTwoPhaseMonthRead(),
+            twoPhaseMonthRead,
+            fragmentId,
+            inputPartition.getWhereCondition(),
+            filterColumns,
+            projectedColumns,
+            blobColumnNames,
+            hasField(scanSchema, LanceConstant.FRAGMENT_ID),
+            inputPartition.getLimit(),
+            inputPartition.getOffset(),
+            inputPartition.getTopNSortOrders()));
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
@@ -156,7 +207,8 @@ public class LanceFragmentScanner implements AutoCloseable {
           dsOpenTimeNs,
           scanCreateTimeNs,
           withRowAddrForBlobs,
-          blobColumnNames);
+          blobColumnNames,
+          twoPhaseMonthRead);
     } catch (Throwable throwable) {
       if (lanceScanner != null) {
         try {
@@ -180,7 +232,10 @@ public class LanceFragmentScanner implements AutoCloseable {
    * @return the arrow reader. The caller is responsible for closing the reader
    */
   public ArrowReader getArrowReader() {
-    return scanner.scanBatches();
+    ArrowReader reader = scanner.scanBatches();
+    return twoPhaseMonthRead
+        ? new RowIdTakeArrowReader(dataset, reader, getColumnNames(inputPartition.getSchema()))
+        : reader;
   }
 
   @Override
@@ -262,6 +317,29 @@ public class LanceFragmentScanner implements AutoCloseable {
     }
     return blobColumns;
   }
+
+  /**
+   * Returns the dataset columns referenced by a SQL where clause. Only identifiers that match a
+   * dataset field name are kept, so literals and SQL keywords never leak into the scan projection.
+   */
+  private static List<String> filterColumns(String where, Schema datasetSchema) {
+    Set<String> fields = new HashSet<>();
+    for (Field field : datasetSchema.getFields()) {
+      fields.add(field.getName());
+    }
+    Set<String> matched = new LinkedHashSet<>();
+    Matcher matcher = IDENTIFIER.matcher(where);
+    while (matcher.find()) {
+      String name = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+      if (fields.contains(name)) {
+        matched.add(name);
+      }
+    }
+    return new ArrayList<>(matched);
+  }
+
+  private static final Pattern IDENTIFIER =
+      Pattern.compile("`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)");
 
   private static List<String> getColumnNames(StructType schema) {
     java.util.Set<String> schemaFields = new java.util.HashSet<>();
