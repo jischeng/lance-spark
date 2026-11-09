@@ -16,6 +16,7 @@ package org.lance.spark.internal;
 import org.lance.Dataset;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
+import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
 import org.lance.spark.utils.Utils;
 
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -152,6 +154,16 @@ class RowIdTakeArrowReaderTest {
       }
       assertEquals(rows(expected), allSliceRows);
     }
+  }
+
+  @Test
+  void parseCoalesceColumnsStripsQuotes() {
+    Map<String, String> parsed =
+        LanceSparkReadOptions.parseCoalesceColumns(
+            "'fusion_sdmap_origin:proto_fusion_sdmap,sdmap_origin:proto_sdmap'");
+    assertEquals(2, parsed.size());
+    assertEquals("proto_fusion_sdmap", parsed.get("fusion_sdmap_origin"));
+    assertEquals("proto_sdmap", parsed.get("sdmap_origin"));
   }
 
   private List<List<Object>> rows(ArrowReader reader) throws Exception {

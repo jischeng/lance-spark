@@ -156,12 +156,8 @@ final class RowIdTakeArrowReader extends ArrowReader {
       List<Long> rowIds,
       int rowCount)
       throws IOException {
-    for (String fbCol : fullNullFallbacks) {
-      FieldVector fbVec = outRoot.getVector(fbCol);
-      fbVec.reset();
-      fbVec.allocateNew();
-    }
     int offset = 0;
+    boolean allocatedForCopy = false;
     try (ArrowReader fbReader = dataset.takeRows(rowIds, fullNullFallbacks)) {
       while (fbReader.loadNextBatch()) {
         VectorSchemaRoot fbRoot = fbReader.getVectorSchemaRoot();
@@ -171,6 +167,7 @@ final class RowIdTakeArrowReader extends ArrowReader {
           List<FieldVector> dstVectors = new ArrayList<>(fullNullFallbacks.size());
           for (String fbCol : fullNullFallbacks) {
             FieldVector dstVec = outRoot.getVector(fbCol);
+            dstVec.reset();
             fbFields.add(dstVec.getField());
             dstVectors.add(dstVec);
           }
@@ -178,6 +175,14 @@ final class RowIdTakeArrowReader extends ArrowReader {
             new VectorLoader(new VectorSchemaRoot(fbFields, dstVectors, 0)).load(batch);
           }
           return;
+        }
+        if (!allocatedForCopy) {
+          for (String fbCol : fullNullFallbacks) {
+            FieldVector fbVec = outRoot.getVector(fbCol);
+            fbVec.reset();
+            fbVec.allocateNew();
+          }
+          allocatedForCopy = true;
         }
         for (String fbCol : fullNullFallbacks) {
           FieldVector srcVec = fbRoot.getVector(fbCol);
@@ -189,6 +194,13 @@ final class RowIdTakeArrowReader extends ArrowReader {
           }
         }
         offset += batchRows;
+      }
+    }
+    if (!allocatedForCopy) {
+      for (String fbCol : fullNullFallbacks) {
+        FieldVector fbVec = outRoot.getVector(fbCol);
+        fbVec.reset();
+        fbVec.allocateNew();
       }
     }
     for (String fbCol : fullNullFallbacks) {

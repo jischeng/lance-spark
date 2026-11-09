@@ -70,6 +70,7 @@ public class LanceFragmentScanner implements AutoCloseable {
   private final boolean twoPhaseMonthRead;
   private final boolean streamingCoalesceRead;
   private final boolean pushedRowIdSliceFilter;
+  private final Map<String, String> activeCoalesce;
 
   private LanceFragmentScanner(
       Dataset dataset,
@@ -83,7 +84,8 @@ public class LanceFragmentScanner implements AutoCloseable {
       Set<String> blobColumnNames,
       boolean twoPhaseMonthRead,
       boolean streamingCoalesceRead,
-      boolean pushedRowIdSliceFilter) {
+      boolean pushedRowIdSliceFilter,
+      Map<String, String> activeCoalesce) {
     this.dataset = dataset;
     this.scanner = scanner;
     this.fragmentId = fragmentId;
@@ -96,6 +98,7 @@ public class LanceFragmentScanner implements AutoCloseable {
     this.twoPhaseMonthRead = twoPhaseMonthRead;
     this.streamingCoalesceRead = streamingCoalesceRead;
     this.pushedRowIdSliceFilter = pushedRowIdSliceFilter;
+    this.activeCoalesce = activeCoalesce;
   }
 
   public static LanceFragmentScanner create(int fragmentId, LanceInputPartition inputPartition) {
@@ -153,10 +156,6 @@ public class LanceFragmentScanner implements AutoCloseable {
               : Collections.emptyList();
       int numSlices = inputPartition.getLanceSplit().getNumSlices();
       boolean unindexedMonthProbe = inputPartition.getLanceSplit().isUnindexedMonthProbe();
-      Map<String, String> activeCoalesce =
-          RowIdTakeArrowReader.resolveActiveCoalesce(
-              projectedColumns, readOptions.getCoalesceColumns());
-      boolean hasCoalesceColumns = !activeCoalesce.isEmpty();
       boolean canCustomRead =
           !projectedColumns.isEmpty()
               && projectedColumns.stream()
@@ -167,41 +166,14 @@ public class LanceFragmentScanner implements AutoCloseable {
               && !inputPartition.getLimit().isPresent()
               && !inputPartition.getOffset().isPresent()
               && !inputPartition.getTopNSortOrders().isPresent();
-      boolean wantTwoPhaseTake =
-          (readOptions.isTwoPhaseMonthRead()
-                  && inputPartition.getWhereCondition().isPresent()
-                  && !filterColumns.isEmpty()
-                  && (unindexedMonthProbe || !hasCoalesceColumns))
-              || (numSlices > 1 && !hasCoalesceColumns);
-      boolean twoPhaseMonthRead = canCustomRead && wantTwoPhaseTake;
-      boolean streamingCoalesceRead = canCustomRead && !twoPhaseMonthRead && hasCoalesceColumns;
-      if (numSlices > 1 && !twoPhaseMonthRead && !streamingCoalesceRead) {
-        throw new IllegalStateException(
-            "Sliced LanceSplit requires custom two-phase or coalesce read");
-      }
-      if (twoPhaseMonthRead) {
-        scanOptions.columns(filterColumns);
-        scanOptions.withRowId(true);
-      } else if (streamingCoalesceRead) {
-        scanOptions.columns(
-            RowIdTakeArrowReader.computeInitialColumns(projectedColumns, activeCoalesce));
-        scanOptions.withRowId(true);
-      }
-      boolean pushedRowIdSliceFilter =
-          numSlices > 1
-              && (twoPhaseMonthRead || streamingCoalesceRead)
-              && !dataset.hasStableRowIds();
-      String effectiveWhere =
-          inputPartition.getWhereCondition().isPresent()
-              ? inputPartition.getWhereCondition().get()
-              : null;
+      boolean pushedRowIdSliceFilter = numSlices > 1 && canCustomRead && !dataset.hasStableRowIds();
+      String slicePred = null;
       if (pushedRowIdSliceFilter) {
         long physicalRows = Math.max(1L, fragment.metadata().getPhysicalRows());
         long baseRowId = ((long) fragmentId) << 32;
         int sliceIndex = inputPartition.getLanceSplit().getSliceIndex();
         long startOffset = (physicalRows * sliceIndex) / numSlices;
         long endOffset = (physicalRows * (sliceIndex + 1)) / numSlices;
-        String slicePred;
         if (sliceIndex <= 0) {
           slicePred = "(_rowid < " + (baseRowId + endOffset) + ")";
         } else if (sliceIndex >= numSlices - 1) {
@@ -214,6 +186,41 @@ public class LanceFragmentScanner implements AutoCloseable {
                   + (baseRowId + endOffset)
                   + ")";
         }
+      }
+      Map<String, String> activeCoalesce =
+          RowIdTakeArrowReader.resolveActiveCoalesce(
+              projectedColumns, readOptions.getCoalesceColumns());
+      boolean hasCoalesceColumns = !activeCoalesce.isEmpty();
+      boolean wantTwoPhaseTake =
+          (readOptions.isTwoPhaseMonthRead()
+                  && inputPartition.getWhereCondition().isPresent()
+                  && !filterColumns.isEmpty()
+                  && unindexedMonthProbe)
+              || (numSlices > 1 && !pushedRowIdSliceFilter && !hasCoalesceColumns);
+      boolean twoPhaseMonthRead = canCustomRead && wantTwoPhaseTake;
+      boolean streamingCoalesceRead = canCustomRead && !twoPhaseMonthRead && hasCoalesceColumns;
+      if (numSlices > 1
+          && !twoPhaseMonthRead
+          && !streamingCoalesceRead
+          && !pushedRowIdSliceFilter) {
+        throw new IllegalStateException(
+            "Sliced LanceSplit requires custom two-phase, coalesce, or pushed rowid slice read");
+      }
+      if (twoPhaseMonthRead) {
+        scanOptions.columns(filterColumns);
+        scanOptions.withRowId(true);
+      } else if (streamingCoalesceRead) {
+        scanOptions.columns(
+            RowIdTakeArrowReader.computeInitialColumns(projectedColumns, activeCoalesce));
+        scanOptions.withRowId(true);
+      } else if (pushedRowIdSliceFilter) {
+        scanOptions.withRowId(true);
+      }
+      String effectiveWhere =
+          inputPartition.getWhereCondition().isPresent()
+              ? inputPartition.getWhereCondition().get()
+              : null;
+      if (slicePred != null) {
         effectiveWhere =
             effectiveWhere != null ? "(" + effectiveWhere + ") AND " + slicePred : slicePred;
       }
@@ -272,7 +279,8 @@ public class LanceFragmentScanner implements AutoCloseable {
           blobColumnNames,
           twoPhaseMonthRead,
           streamingCoalesceRead,
-          pushedRowIdSliceFilter);
+          pushedRowIdSliceFilter,
+          Collections.unmodifiableMap(activeCoalesce));
     } catch (Throwable throwable) {
       if (lanceScanner != null) {
         try {
@@ -300,10 +308,7 @@ public class LanceFragmentScanner implements AutoCloseable {
     LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
     if (streamingCoalesceRead) {
       return new CoalesceArrowReader(
-          dataset,
-          reader,
-          getColumnNames(inputPartition.getSchema()),
-          readOptions.getCoalesceColumns());
+          dataset, reader, getColumnNames(inputPartition.getSchema()), activeCoalesce);
     }
     if (!twoPhaseMonthRead) {
       return reader;
@@ -315,7 +320,7 @@ public class LanceFragmentScanner implements AutoCloseable {
         readOptions.getBatchSize(),
         pushedRowIdSliceFilter ? 0 : inputPartition.getLanceSplit().getSliceIndex(),
         pushedRowIdSliceFilter ? 1 : inputPartition.getLanceSplit().getNumSlices(),
-        readOptions.getCoalesceColumns());
+        activeCoalesce);
   }
 
   @Override

@@ -158,20 +158,34 @@ public class LanceSparkReadOptions implements Serializable {
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
   }
 
+  private static String stripQuotes(String s) {
+    if (s == null) {
+      return "";
+    }
+    String res = s.trim();
+    while (res.length() >= 2
+        && ((res.startsWith("'") && res.endsWith("'"))
+            || (res.startsWith("\"") && res.endsWith("\"")))) {
+      res = res.substring(1, res.length() - 1).trim();
+    }
+    return res;
+  }
+
   public static Map<String, String> parseCoalesceColumns(String spec) {
-    if (spec == null || spec.trim().isEmpty()) {
+    String cleanSpec = stripQuotes(spec);
+    if (cleanSpec.isEmpty()) {
       return Collections.emptyMap();
     }
     Map<String, String> map = new LinkedHashMap<>();
-    for (String entry : spec.split(",")) {
-      String trimmed = entry.trim();
+    for (String entry : cleanSpec.split(",")) {
+      String trimmed = stripQuotes(entry);
       if (trimmed.isEmpty()) {
         continue;
       }
       int idx = trimmed.indexOf(':');
       if (idx > 0 && idx < trimmed.length() - 1) {
-        String primary = trimmed.substring(0, idx).trim();
-        String fallback = trimmed.substring(idx + 1).trim();
+        String primary = stripQuotes(trimmed.substring(0, idx));
+        String fallback = stripQuotes(trimmed.substring(idx + 1));
         if (!primary.isEmpty() && !fallback.isEmpty()) {
           map.put(primary, fallback);
         }

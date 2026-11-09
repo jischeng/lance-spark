@@ -453,7 +453,10 @@ public class LanceScanBuilder
             }
           }
         }
-        long effectiveMaxRowsPerSplit = Math.max((long) maxRowsPerSplit, totalActiveRows / 512L);
+        long effectiveMaxRowsPerSplit =
+            Math.min(
+                Math.max((long) maxRowsPerSplit, 524288L),
+                Math.max((long) maxRowsPerSplit, totalActiveRows / 512L));
         List<LanceSplit> expandedSplits = new ArrayList<>(splits.size());
         for (LanceSplit split : splits) {
           if (split.getFragments().size() != 1) {
