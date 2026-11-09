@@ -437,6 +437,23 @@ public class LanceScanBuilder
               && Arrays.stream(schema.fields()).noneMatch(BlobUtils::isBlobSparkField);
       int maxRowsPerSplit = resolvedReadOptions.getMaxRowsPerSplit();
       if (canTwoPhaseSlice && maxRowsPerSplit > 0) {
+        long totalActiveRows = 0L;
+        for (LanceSplit split : splits) {
+          if (split.getFragments().size() == 1) {
+            int fragId = split.getFragments().get(0);
+            if (survivingFragmentIds != null && !survivingFragmentIds.contains(fragId)) {
+              continue;
+            }
+            boolean skipUnindexedSlice =
+                monthCoveredFragments != null
+                    && monthCoveredHasMatches
+                    && !monthCoveredFragments.contains(fragId);
+            if (!skipUnindexedSlice) {
+              totalActiveRows += fragmentRowCounts.getOrDefault(fragId, 0L);
+            }
+          }
+        }
+        long effectiveMaxRowsPerSplit = Math.max((long) maxRowsPerSplit, totalActiveRows / 512L);
         List<LanceSplit> expandedSplits = new ArrayList<>(splits.size());
         for (LanceSplit split : splits) {
           if (split.getFragments().size() != 1) {
@@ -453,15 +470,21 @@ public class LanceScanBuilder
                   && !monthCoveredFragments.contains(fragId);
           long rows = fragmentRowCounts.getOrDefault(fragId, 0L);
           int numSlices =
-              (!skipUnindexedSlice && rows > maxRowsPerSplit)
-                  ? (int) Math.min(16L, (rows + maxRowsPerSplit - 1) / maxRowsPerSplit)
+              (!skipUnindexedSlice && rows > effectiveMaxRowsPerSplit)
+                  ? (int)
+                      Math.min(
+                          16L, (rows + effectiveMaxRowsPerSplit - 1) / effectiveMaxRowsPerSplit)
                   : 1;
           for (int s = 0; s < numSlices; s++) {
-            expandedSplits.add(new LanceSplit(Collections.singletonList(fragId), s, numSlices));
+            expandedSplits.add(
+                new LanceSplit(
+                    Collections.singletonList(fragId), s, numSlices, skipUnindexedSlice));
           }
         }
         LOG.info(
-            "Expanded splits with maxRowsPerSplit={}: {} base fragments -> {} splits",
+            "Expanded splits with effectiveMaxRowsPerSplit={} (configured={}):"
+                + " {} base fragments -> {} splits",
+            effectiveMaxRowsPerSplit,
             maxRowsPerSplit,
             splits.size(),
             expandedSplits.size());

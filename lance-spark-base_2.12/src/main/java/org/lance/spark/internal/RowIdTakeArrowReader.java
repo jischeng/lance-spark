@@ -73,8 +73,14 @@ final class RowIdTakeArrowReader extends ArrowReader {
     this.numSlices = Math.max(1, numSlices);
     this.stripeSize = this.takeBatchSize > 0 ? Math.max(this.takeBatchSize, 4096) : 4096;
 
+    this.activeCoalesce = resolveActiveCoalesce(this.columns, coalesceColumns);
+    this.initialColumns = computeInitialColumns(this.columns, this.activeCoalesce);
+  }
+
+  static Map<String, String> resolveActiveCoalesce(
+      List<String> columns, Map<String, String> coalesceColumns) {
     Map<String, String> validCoalesce = new LinkedHashMap<>();
-    Set<String> columnSet = new HashSet<>(this.columns);
+    Set<String> columnSet = new HashSet<>(columns);
     if (coalesceColumns != null && !coalesceColumns.isEmpty()) {
       for (Map.Entry<String, String> entry : coalesceColumns.entrySet()) {
         String primary = entry.getKey();
@@ -90,10 +96,131 @@ final class RowIdTakeArrowReader extends ArrowReader {
         }
       }
     }
-    this.activeCoalesce = Collections.unmodifiableMap(validCoalesce);
-    Set<String> fallbackSet = new HashSet<>(this.activeCoalesce.values());
-    this.initialColumns =
-        this.columns.stream().filter(c -> !fallbackSet.contains(c)).collect(Collectors.toList());
+    return Collections.unmodifiableMap(validCoalesce);
+  }
+
+  static List<String> computeInitialColumns(
+      List<String> columns, Map<String, String> activeCoalesce) {
+    Set<String> fallbackSet = new HashSet<>(activeCoalesce.values());
+    return columns.stream().filter(c -> !fallbackSet.contains(c)).collect(Collectors.toList());
+  }
+
+  static void populateFallbacksFromRowIdVector(
+      Dataset dataset,
+      VectorSchemaRoot outRoot,
+      Map<String, String> activeCoalesce,
+      UInt8Vector rowIdVec,
+      int rowCount)
+      throws IOException {
+    List<String> fullNullFallbacks = null;
+    for (Map.Entry<String, String> entry : activeCoalesce.entrySet()) {
+      String primaryCol = entry.getKey();
+      String fallbackCol = entry.getValue();
+      FieldVector primaryVec = outRoot.getVector(primaryCol);
+      FieldVector fallbackVec = outRoot.getVector(fallbackCol);
+      int nullCount = primaryVec.getNullCount();
+      if (nullCount == 0) {
+        fallbackVec.reset();
+        fallbackVec.setValueCount(rowCount);
+      } else if (nullCount == rowCount && rowCount > 0) {
+        if (fullNullFallbacks == null) {
+          fullNullFallbacks = new ArrayList<>(activeCoalesce.size());
+        }
+        fullNullFallbacks.add(fallbackCol);
+      } else {
+        List<Long> nullRowIds = new ArrayList<>(nullCount);
+        int[] nullIndices = new int[nullCount];
+        int k = 0;
+        for (int i = 0; i < rowCount; i++) {
+          if (primaryVec.isNull(i)) {
+            nullRowIds.add(rowIdVec.get(i));
+            nullIndices[k++] = i;
+          }
+        }
+        fetchPartialFallback(dataset, fallbackCol, fallbackVec, nullRowIds, nullIndices, rowCount);
+      }
+    }
+    if (fullNullFallbacks != null && !fullNullFallbacks.isEmpty()) {
+      List<Long> allRowIds = new ArrayList<>(rowCount);
+      for (int i = 0; i < rowCount; i++) {
+        allRowIds.add(rowIdVec.get(i));
+      }
+      fetchFullNullFallbacks(dataset, outRoot, fullNullFallbacks, allRowIds, rowCount);
+    }
+  }
+
+  private static void fetchFullNullFallbacks(
+      Dataset dataset,
+      VectorSchemaRoot outRoot,
+      List<String> fullNullFallbacks,
+      List<Long> rowIds,
+      int rowCount)
+      throws IOException {
+    for (String fbCol : fullNullFallbacks) {
+      FieldVector fbVec = outRoot.getVector(fbCol);
+      fbVec.reset();
+      fbVec.allocateNew();
+    }
+    int offset = 0;
+    try (ArrowReader fbReader = dataset.takeRows(rowIds, fullNullFallbacks)) {
+      while (fbReader.loadNextBatch()) {
+        VectorSchemaRoot fbRoot = fbReader.getVectorSchemaRoot();
+        int batchRows = fbRoot.getRowCount();
+        if (offset == 0 && batchRows == rowCount) {
+          List<Field> fbFields = new ArrayList<>(fullNullFallbacks.size());
+          List<FieldVector> dstVectors = new ArrayList<>(fullNullFallbacks.size());
+          for (String fbCol : fullNullFallbacks) {
+            FieldVector dstVec = outRoot.getVector(fbCol);
+            fbFields.add(dstVec.getField());
+            dstVectors.add(dstVec);
+          }
+          try (ArrowRecordBatch batch = new VectorUnloader(fbRoot).getRecordBatch()) {
+            new VectorLoader(new VectorSchemaRoot(fbFields, dstVectors, 0)).load(batch);
+          }
+          return;
+        }
+        for (String fbCol : fullNullFallbacks) {
+          FieldVector srcVec = fbRoot.getVector(fbCol);
+          FieldVector dstVec = outRoot.getVector(fbCol);
+          for (int j = 0; j < batchRows; j++) {
+            if (!srcVec.isNull(j)) {
+              dstVec.copyFromSafe(j, offset + j, srcVec);
+            }
+          }
+        }
+        offset += batchRows;
+      }
+    }
+    for (String fbCol : fullNullFallbacks) {
+      outRoot.getVector(fbCol).setValueCount(rowCount);
+    }
+  }
+
+  private static void fetchPartialFallback(
+      Dataset dataset,
+      String fallbackCol,
+      FieldVector fallbackVec,
+      List<Long> nullRowIds,
+      int[] nullIndices,
+      int rowCount)
+      throws IOException {
+    fallbackVec.reset();
+    fallbackVec.allocateNew();
+    int fetchedIdx = 0;
+    try (ArrowReader fbReader =
+        dataset.takeRows(nullRowIds, Collections.singletonList(fallbackCol))) {
+      while (fbReader.loadNextBatch()) {
+        FieldVector srcVec = fbReader.getVectorSchemaRoot().getVector(fallbackCol);
+        int srcCount = fbReader.getVectorSchemaRoot().getRowCount();
+        for (int j = 0; j < srcCount; j++) {
+          if (!srcVec.isNull(j)) {
+            fallbackVec.copyFromSafe(j, nullIndices[fetchedIdx], srcVec);
+          }
+          fetchedIdx++;
+        }
+      }
+    }
+    fallbackVec.setValueCount(rowCount);
   }
 
   @Override

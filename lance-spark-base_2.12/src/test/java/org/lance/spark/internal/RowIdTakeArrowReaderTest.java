@@ -96,6 +96,38 @@ class RowIdTakeArrowReaderTest {
   }
 
   @Test
+  void streamingCoalesceSkipsFallbackWhenPrimaryNonNull() throws Exception {
+    List<String> columns = Arrays.asList("c", "b");
+    try (Dataset dataset =
+            Utils.openDatasetBuilder(TestUtils.TestTable1Config.readOptions).build();
+        LanceScanner direct =
+            dataset.newScan(new ScanOptions.Builder().columns(columns).batchSize(2).build());
+        ArrowReader expected = direct.scanBatches();
+        LanceScanner streamScan =
+            dataset.newScan(
+                new ScanOptions.Builder()
+                    .columns(Collections.singletonList("c"))
+                    .withRowId(true)
+                    .batchSize(2)
+                    .build());
+        ArrowReader actual =
+            new CoalesceArrowReader(
+                dataset, streamScan.scanBatches(), columns, Collections.singletonMap("c", "b"))) {
+      List<List<Object>> expRows = rows(expected);
+      List<List<Object>> actRows = rows(actual);
+      assertEquals(expRows.size(), actRows.size());
+      for (int i = 0; i < expRows.size(); i++) {
+        assertEquals(expRows.get(i).get(0), actRows.get(i).get(0));
+        if (expRows.get(i).get(0) != null) {
+          assertNull(actRows.get(i).get(1));
+        } else {
+          assertEquals(expRows.get(i).get(1), actRows.get(i).get(1));
+        }
+      }
+    }
+  }
+
+  @Test
   void slicesPartitionRowsDisjointly() throws Exception {
     List<String> columns = Arrays.asList("c", "b");
     try (Dataset dataset =
