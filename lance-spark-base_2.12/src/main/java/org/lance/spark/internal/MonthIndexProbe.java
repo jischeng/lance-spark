@@ -1,3 +1,16 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.lance.spark.internal;
 
 import org.lance.Dataset;
@@ -9,8 +22,10 @@ import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.utils.Utils;
+
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.ipc.ArrowReader;
+
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -26,15 +41,18 @@ public final class MonthIndexProbe {
       throw new IllegalArgumentException("month probe requires a managed local Lance path");
     }
     long version = Long.parseLong(requestedVersion);
-    LanceSparkReadOptions options = LanceSparkReadOptions.builder()
-        .datasetUri(path).version(version).build();
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder().datasetUri(path).version(version).build();
     try (Dataset dataset = Utils.openDatasetBuilder(options).build()) {
       if (dataset.version() != version) {
         throw new IllegalStateException("Lance snapshot version mismatch");
       }
-      int monthField = dataset.getLanceSchema().fields().stream()
-          .filter(field -> field.getName().equals("month")).findFirst()
-          .orElseThrow(() -> new IllegalArgumentException("month column missing")).getId();
+      int monthField =
+          dataset.getLanceSchema().fields().stream()
+              .filter(field -> field.getName().equals("month"))
+              .findFirst()
+              .orElseThrow(() -> new IllegalArgumentException("month column missing"))
+              .getId();
       Set<String> months = new TreeSet<>();
       Set<Integer> covered = new HashSet<>();
       try {
@@ -48,8 +66,8 @@ public final class MonthIndexProbe {
           }
           String indexPath = path + "/_indices/" + index.uuid() + "/bitmap_page_lookup.lance";
           try (LanceFileReader file = LanceFileReader.open(indexPath, dataset.allocator());
-              ArrowReader reader = file.readAll(Collections.singletonList("keys"),
-                  Collections.emptyList(), 1024)) {
+              ArrowReader reader =
+                  file.readAll(Collections.singletonList("keys"), Collections.emptyList(), 1024)) {
             readMonths(reader, "keys", months);
           }
           covered.addAll(index.fragments().get());
@@ -63,8 +81,12 @@ public final class MonthIndexProbe {
         if (covered.contains(fragment.getId())) {
           continue;
         }
-        try (LanceScanner scanner = fragment.newScan(new ScanOptions.Builder()
-            .columns(Collections.singletonList("month")).batchSize(65536).build());
+        try (LanceScanner scanner =
+                fragment.newScan(
+                    new ScanOptions.Builder()
+                        .columns(Collections.singletonList("month"))
+                        .batchSize(65536)
+                        .build());
             ArrowReader reader = scanner.scanBatches()) {
           readMonths(reader, "month", months);
         }
@@ -77,10 +99,14 @@ public final class MonthIndexProbe {
           throw new IllegalArgumentException("invalid month value");
         }
       }
-      return "{\"version\":" + version + ",\"index_coverage_ids\":" + covered.size()
+      return "{\"version\":"
+          + version
+          + ",\"index_coverage_ids\":"
+          + covered.size()
           + ",\"months\":["
-          + String.join(",", months.stream().map(month -> "\"" + month + "\"")
-              .collect(Collectors.toList())) + "]}";
+          + String.join(
+              ",", months.stream().map(month -> "\"" + month + "\"").collect(Collectors.toList()))
+          + "]}";
     }
   }
 
@@ -98,8 +124,9 @@ public final class MonthIndexProbe {
         if (end - offset != 6) {
           throw new IllegalArgumentException("invalid month length");
         }
-        long encoded = Integer.toUnsignedLong(vector.getDataBuffer().getInt(offset))
-            | ((long) Short.toUnsignedInt(vector.getDataBuffer().getShort(offset + 4)) << 32);
+        long encoded =
+            Integer.toUnsignedLong(vector.getDataBuffer().getInt(offset))
+                | ((long) Short.toUnsignedInt(vector.getDataBuffer().getShort(offset + 4)) << 32);
         if (encoded != previous) {
           months.add(vector.getObject(index).toString());
           previous = encoded;

@@ -19,7 +19,9 @@ import org.lance.namespace.LanceNamespace;
 import com.google.common.base.Preconditions;
 
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -53,6 +55,8 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
   public static final String CONFIG_TWO_PHASE_MONTH_READ = "two_phase_month_read";
+  public static final String CONFIG_MAX_ROWS_PER_SPLIT = "max_rows_per_split";
+  public static final String CONFIG_COALESCE_COLUMNS = "coalesce_columns";
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
   private static final String DEPRECATED_CONFIG_NEAREST = "nearest";
 
@@ -110,6 +114,8 @@ public class LanceSparkReadOptions implements Serializable {
   private final int batchSize;
   private final boolean useScalarIndex;
   private final boolean twoPhaseMonthRead;
+  private final int maxRowsPerSplit;
+  private final Map<String, String> coalesceColumns;
   private final boolean topNPushDown;
   private final Map<String, String> storageOptions;
 
@@ -141,12 +147,37 @@ public class LanceSparkReadOptions implements Serializable {
     this.batchSize = builder.batchSize;
     this.useScalarIndex = builder.useScalarIndex;
     this.twoPhaseMonthRead = builder.twoPhaseMonthRead;
+    this.maxRowsPerSplit = builder.maxRowsPerSplit;
+    this.coalesceColumns =
+        Collections.unmodifiableMap(new LinkedHashMap<>(builder.coalesceColumns));
     this.topNPushDown = builder.topNPushDown;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
     this.tableId = builder.tableId;
     this.catalogName = builder.catalogName;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
+  }
+
+  public static Map<String, String> parseCoalesceColumns(String spec) {
+    if (spec == null || spec.trim().isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Map<String, String> map = new LinkedHashMap<>();
+    for (String entry : spec.split(",")) {
+      String trimmed = entry.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      int idx = trimmed.indexOf(':');
+      if (idx > 0 && idx < trimmed.length() - 1) {
+        String primary = trimmed.substring(0, idx).trim();
+        String fallback = trimmed.substring(idx + 1).trim();
+        if (!primary.isEmpty() && !fallback.isEmpty()) {
+          map.put(primary, fallback);
+        }
+      }
+    }
+    return map;
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -261,6 +292,14 @@ public class LanceSparkReadOptions implements Serializable {
     return twoPhaseMonthRead;
   }
 
+  public int getMaxRowsPerSplit() {
+    return maxRowsPerSplit;
+  }
+
+  public Map<String, String> getCoalesceColumns() {
+    return coalesceColumns;
+  }
+
   public boolean isTopNPushDown() {
     return topNPushDown;
   }
@@ -322,6 +361,8 @@ public class LanceSparkReadOptions implements Serializable {
         .batchSize(this.batchSize)
         .useScalarIndex(this.useScalarIndex)
         .twoPhaseMonthRead(this.twoPhaseMonthRead)
+        .maxRowsPerSplit(this.maxRowsPerSplit)
+        .coalesceColumns(this.coalesceColumns)
         .topNPushDown(this.topNPushDown)
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
@@ -349,6 +390,52 @@ public class LanceSparkReadOptions implements Serializable {
         .batchSize(this.batchSize)
         .useScalarIndex(this.useScalarIndex)
         .twoPhaseMonthRead(enabled)
+        .maxRowsPerSplit(this.maxRowsPerSplit)
+        .coalesceColumns(this.coalesceColumns)
+        .topNPushDown(this.topNPushDown)
+        .storageOptions(this.storageOptions)
+        .namespace(this.namespace)
+        .tableId(this.tableId)
+        .catalogName(this.catalogName)
+        .executorCredentialRefresh(this.executorCredentialRefresh)
+        .build();
+  }
+
+  public LanceSparkReadOptions withMaxRowsPerSplit(int maxRowsPerSplit) {
+    return builder()
+        .datasetUri(this.datasetUri)
+        .pushDownFilters(this.pushDownFilters)
+        .blockSize(this.blockSize)
+        .version(this.version)
+        .indexCacheSize(this.indexCacheSize)
+        .metadataCacheSize(this.metadataCacheSize)
+        .batchSize(this.batchSize)
+        .useScalarIndex(this.useScalarIndex)
+        .twoPhaseMonthRead(this.twoPhaseMonthRead)
+        .maxRowsPerSplit(maxRowsPerSplit)
+        .coalesceColumns(this.coalesceColumns)
+        .topNPushDown(this.topNPushDown)
+        .storageOptions(this.storageOptions)
+        .namespace(this.namespace)
+        .tableId(this.tableId)
+        .catalogName(this.catalogName)
+        .executorCredentialRefresh(this.executorCredentialRefresh)
+        .build();
+  }
+
+  public LanceSparkReadOptions withCoalesceColumns(Map<String, String> coalesceColumns) {
+    return builder()
+        .datasetUri(this.datasetUri)
+        .pushDownFilters(this.pushDownFilters)
+        .blockSize(this.blockSize)
+        .version(this.version)
+        .indexCacheSize(this.indexCacheSize)
+        .metadataCacheSize(this.metadataCacheSize)
+        .batchSize(this.batchSize)
+        .useScalarIndex(this.useScalarIndex)
+        .twoPhaseMonthRead(this.twoPhaseMonthRead)
+        .maxRowsPerSplit(this.maxRowsPerSplit)
+        .coalesceColumns(coalesceColumns)
         .topNPushDown(this.topNPushDown)
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
@@ -394,8 +481,10 @@ public class LanceSparkReadOptions implements Serializable {
         && batchSize == that.batchSize
         && useScalarIndex == that.useScalarIndex
         && twoPhaseMonthRead == that.twoPhaseMonthRead
+        && maxRowsPerSplit == that.maxRowsPerSplit
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
+        && Objects.equals(coalesceColumns, that.coalesceColumns)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
         && Objects.equals(version, that.version)
@@ -417,6 +506,8 @@ public class LanceSparkReadOptions implements Serializable {
         batchSize,
         useScalarIndex,
         twoPhaseMonthRead,
+        maxRowsPerSplit,
+        coalesceColumns,
         topNPushDown,
         storageOptions,
         tableId,
@@ -434,6 +525,8 @@ public class LanceSparkReadOptions implements Serializable {
     private int batchSize = DEFAULT_BATCH_SIZE;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
     private boolean twoPhaseMonthRead = false;
+    private int maxRowsPerSplit = 0;
+    private Map<String, String> coalesceColumns = Collections.emptyMap();
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
@@ -485,6 +578,17 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder twoPhaseMonthRead(boolean twoPhaseMonthRead) {
       this.twoPhaseMonthRead = twoPhaseMonthRead;
+      return this;
+    }
+
+    public Builder maxRowsPerSplit(int maxRowsPerSplit) {
+      this.maxRowsPerSplit = Math.max(0, maxRowsPerSplit);
+      return this;
+    }
+
+    public Builder coalesceColumns(Map<String, String> coalesceColumns) {
+      this.coalesceColumns =
+          coalesceColumns == null ? Collections.emptyMap() : new LinkedHashMap<>(coalesceColumns);
       return this;
     }
 
@@ -585,6 +689,12 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_TWO_PHASE_MONTH_READ)) {
         this.twoPhaseMonthRead = Boolean.parseBoolean(opts.get(CONFIG_TWO_PHASE_MONTH_READ));
+      }
+      if (opts.containsKey(CONFIG_MAX_ROWS_PER_SPLIT)) {
+        this.maxRowsPerSplit = Math.max(0, Integer.parseInt(opts.get(CONFIG_MAX_ROWS_PER_SPLIT)));
+      }
+      if (opts.containsKey(CONFIG_COALESCE_COLUMNS)) {
+        this.coalesceColumns = parseCoalesceColumns(opts.get(CONFIG_COALESCE_COLUMNS));
       }
       if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =

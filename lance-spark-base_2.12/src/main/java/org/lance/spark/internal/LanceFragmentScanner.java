@@ -34,15 +34,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -66,6 +65,7 @@ public class LanceFragmentScanner implements AutoCloseable {
 
   /** The names of blob columns in the projected schema. */
   private final Set<String> blobColumnNames;
+
   private final boolean twoPhaseMonthRead;
 
   private LanceFragmentScanner(
@@ -144,42 +144,55 @@ public class LanceFragmentScanner implements AutoCloseable {
           inputPartition.getWhereCondition().isPresent()
               ? filterColumns(inputPartition.getWhereCondition().get(), dataset.getSchema())
               : Collections.emptyList();
+      int numSlices = inputPartition.getLanceSplit().getNumSlices();
+      boolean hasCoalesceColumns = !readOptions.getCoalesceColumns().isEmpty();
+      boolean wantTwoPhase =
+          (readOptions.isTwoPhaseMonthRead()
+                  && inputPartition.getWhereCondition().isPresent()
+                  && !filterColumns.isEmpty())
+              || numSlices > 1
+              || hasCoalesceColumns;
       boolean twoPhaseMonthRead =
-          readOptions.isTwoPhaseMonthRead()
-              && inputPartition.getWhereCondition().isPresent()
-              && inputPartition.getWhereCondition().get().toLowerCase(Locale.ROOT).contains("month")
-              && !filterColumns.isEmpty()
+          wantTwoPhase
               && !projectedColumns.isEmpty()
               && projectedColumns.stream()
                   .noneMatch(name -> name.startsWith("_") || name.contains("."))
-              && Arrays.stream(scanSchema.fields())
-                  .noneMatch(field -> field.name().startsWith("_"))
+              && Arrays.stream(scanSchema.fields()).noneMatch(field -> field.name().startsWith("_"))
               && !hasBlobColumns
               && !hasField(scanSchema, LanceConstant.FRAGMENT_ID)
               && !inputPartition.getLimit().isPresent()
               && !inputPartition.getOffset().isPresent()
               && !inputPartition.getTopNSortOrders().isPresent();
+      if (numSlices > 1 && !twoPhaseMonthRead) {
+        throw new IllegalStateException("Sliced LanceSplit requires twoPhaseMonthRead");
+      }
       if (twoPhaseMonthRead) {
         scanOptions.columns(filterColumns);
         scanOptions.withRowId(true);
       }
-      LOG.debug(String.format(
-            "two-phase gate: enabled={} fragment={} where={} filterColumns={} projected={} blobs={} fragId={} limit={} offset={} topN={}",
-            readOptions.isTwoPhaseMonthRead(),
-            twoPhaseMonthRead,
-            fragmentId,
-            inputPartition.getWhereCondition(),
-            filterColumns,
-            projectedColumns,
-            blobColumnNames,
-            hasField(scanSchema, LanceConstant.FRAGMENT_ID),
-            inputPartition.getLimit(),
-            inputPartition.getOffset(),
-            inputPartition.getTopNSortOrders()));
+      LOG.debug(
+          "two-phase gate: enabled={} active={} fragment={} slice={}/{} where={} filterColumns={}"
+              + " projected={} blobs={} fragId={} limit={} offset={} topN={}",
+          readOptions.isTwoPhaseMonthRead(),
+          twoPhaseMonthRead,
+          fragmentId,
+          inputPartition.getLanceSplit().getSliceIndex(),
+          numSlices,
+          inputPartition.getWhereCondition(),
+          filterColumns,
+          projectedColumns,
+          blobColumnNames,
+          hasField(scanSchema, LanceConstant.FRAGMENT_ID),
+          inputPartition.getLimit(),
+          inputPartition.getOffset(),
+          inputPartition.getTopNSortOrders());
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptions.filter(inputPartition.getWhereCondition().get());
       }
-      scanOptions.batchSize(readOptions.getBatchSize());
+      scanOptions.batchSize(
+          twoPhaseMonthRead
+              ? Math.max(readOptions.getBatchSize(), 16384)
+              : readOptions.getBatchSize());
       scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());
@@ -233,9 +246,18 @@ public class LanceFragmentScanner implements AutoCloseable {
    */
   public ArrowReader getArrowReader() {
     ArrowReader reader = scanner.scanBatches();
-    return twoPhaseMonthRead
-        ? new RowIdTakeArrowReader(dataset, reader, getColumnNames(inputPartition.getSchema()))
-        : reader;
+    if (!twoPhaseMonthRead) {
+      return reader;
+    }
+    LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
+    return new RowIdTakeArrowReader(
+        dataset,
+        reader,
+        getColumnNames(inputPartition.getSchema()),
+        readOptions.getBatchSize(),
+        inputPartition.getLanceSplit().getSliceIndex(),
+        inputPartition.getLanceSplit().getNumSlices(),
+        readOptions.getCoalesceColumns());
   }
 
   @Override
@@ -338,8 +360,7 @@ public class LanceFragmentScanner implements AutoCloseable {
     return new ArrayList<>(matched);
   }
 
-  private static final Pattern IDENTIFIER =
-      Pattern.compile("`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)");
+  private static final Pattern IDENTIFIER = Pattern.compile("`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)");
 
   private static List<String> getColumnNames(StructType schema) {
     java.util.Set<String> schemaFields = new java.util.HashSet<>();
