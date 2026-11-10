@@ -23,8 +23,11 @@ import org.lance.index.IndexDescription;
 import org.lance.index.IndexType;
 import org.lance.index.scalar.ZoneStats;
 import org.lance.ipc.ColumnOrdering;
+import org.lance.ipc.LanceScanner;
+import org.lance.ipc.ScanOptions;
 import org.lance.memwal.ShardingField;
 import org.lance.memwal.ShardingSpec;
+import org.lance.schema.LanceField;
 import org.lance.schema.LanceSchema;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
@@ -40,6 +43,8 @@ import org.lance.spark.utils.FullTextQueryUtils;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 
+import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -85,7 +90,53 @@ public class LanceScanBuilder
         SupportsPushDownAggregates {
   private static final Logger LOG = LoggerFactory.getLogger(LanceScanBuilder.class);
 
+  /** Session switch that turns on two-phase month reads for every scan of this query. */
+  public static final String CONF_TWO_PHASE_MONTH_READ = "spark.lance.two_phase_month_read";
+
+  /** Session config for maximum rows per LanceSplit when two-phase slicing is enabled. */
+  public static final String CONF_MAX_ROWS_PER_SPLIT = "spark.lance.max_rows_per_split";
+
+  /** Session config for primary:fallback column pairs used in COALESCE(primary, fallback). */
+  public static final String CONF_COALESCE_COLUMNS = "spark.lance.coalesce_columns";
+
   private final LanceSparkReadOptions readOptions;
+
+  /**
+   * Reads the session-level two-phase month read switch. Catalog-resolved tables ignore the
+   * provider OPTIONS map, so a session configuration is the only way to enable it for {@code USING
+   * lance OPTIONS (catalog ...)} queries.
+   */
+  private static boolean twoPhaseMonthReadEnabled() {
+    scala.Option<org.apache.spark.sql.SparkSession> session =
+        org.apache.spark.sql.SparkSession.getActiveSession();
+    if (session.isEmpty()) {
+      return false;
+    }
+    return Boolean.parseBoolean(session.get().conf().get(CONF_TWO_PHASE_MONTH_READ, "false"));
+  }
+
+  private static int maxRowsPerSplitFromConf() {
+    scala.Option<org.apache.spark.sql.SparkSession> session =
+        org.apache.spark.sql.SparkSession.getActiveSession();
+    if (session.isEmpty()) {
+      return 0;
+    }
+    try {
+      return Math.max(0, Integer.parseInt(session.get().conf().get(CONF_MAX_ROWS_PER_SPLIT, "0")));
+    } catch (NumberFormatException e) {
+      return 0;
+    }
+  }
+
+  private static Map<String, String> coalesceColumnsFromConf() {
+    scala.Option<org.apache.spark.sql.SparkSession> session =
+        org.apache.spark.sql.SparkSession.getActiveSession();
+    if (session.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return LanceSparkReadOptions.parseCoalesceColumns(
+        session.get().conf().get(CONF_COALESCE_COLUMNS, ""));
+  }
 
   /** Full table schema before column pruning; used to widen nested structs for vectorized reads. */
   private final StructType fullSchema;
@@ -322,13 +373,205 @@ public class LanceScanBuilder
             summary.getTotalRows());
       }
 
+      LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(
+            "two-phase month read: conf={} option={}",
+            twoPhaseMonthReadEnabled(),
+            resolvedReadOptions.isTwoPhaseMonthRead());
+      }
+      if (!resolvedReadOptions.isTwoPhaseMonthRead() && twoPhaseMonthReadEnabled()) {
+        resolvedReadOptions = resolvedReadOptions.withTwoPhaseMonthRead(true);
+      }
+      if (resolvedReadOptions.getMaxRowsPerSplit() <= 0) {
+        int confMaxRows = maxRowsPerSplitFromConf();
+        if (confMaxRows > 0) {
+          resolvedReadOptions = resolvedReadOptions.withMaxRowsPerSplit(confMaxRows);
+        }
+      }
+      if (resolvedReadOptions.getCoalesceColumns().isEmpty()) {
+        Map<String, String> confCoalesce = coalesceColumnsFromConf();
+        if (!confCoalesce.isEmpty()) {
+          resolvedReadOptions = resolvedReadOptions.withCoalesceColumns(confCoalesce);
+        }
+      }
       // Plan Arrow batches from the dataset schema already loaded here. A scan that cannot emit
       // them reads as usual, also when the arrow_batch_reads read option asks for them.
       ArrowBatchAdapter.Plan arrowBatchPlan =
           pushedAggregation.isPresent()
               ? ArrowBatchAdapter.Plan.unsupported("the scan has a pushed aggregation")
-              : ArrowBatchAdapter.plan(schema, dataset.getSchema());
-      LanceSparkReadOptions resolvedReadOptions = readOptions.withRef(scanPlan.getRef());
+              : (resolvedReadOptions.isTwoPhaseMonthRead()
+                      || !resolvedReadOptions.getCoalesceColumns().isEmpty()
+                      || resolvedReadOptions.getMaxRowsPerSplit() > 0)
+                  ? ArrowBatchAdapter.Plan.unsupported(
+                      "the scan uses custom two-phase, coalesce, or sliced fragment reader")
+                  : ArrowBatchAdapter.plan(schema, dataset.getSchema());
+
+      Map<Integer, Long> fragmentRowCounts = new HashMap<>(scanPlan.getFragmentRowCounts());
+      Set<Integer> monthCoveredFragments = null;
+      boolean monthCoveredHasMatches = false;
+      if (resolvedReadOptions.isTwoPhaseMonthRead()
+          && resolvedReadOptions.isUseScalarIndex()
+          && pushedPredicates.length > 0) {
+        List<Predicate> monthPredicates = new ArrayList<>();
+        for (Predicate p : pushedPredicates) {
+          Set<String> refs = extractReferencedColumns(new Predicate[] {p});
+          if (refs.size() == 1 && refs.contains("month")) {
+            monthPredicates.add(p);
+          }
+        }
+        if (!monthPredicates.isEmpty()) {
+          Optional<String> monthWhere =
+              FilterPushDown.compileFiltersToSqlWhereClause(
+                  monthPredicates.toArray(new Predicate[0]));
+          if (monthWhere.isPresent()) {
+            try {
+              int monthFieldId =
+                  dataset.getLanceSchema().fields().stream()
+                      .filter(f -> "month".equals(f.getName()))
+                      .findFirst()
+                      .map(LanceField::getId)
+                      .orElse(-1);
+              Set<Integer> covered = new HashSet<>();
+              if (monthFieldId >= 0) {
+                for (Index index : dataset.getIndexes()) {
+                  if (index.fields().equals(Collections.singletonList(monthFieldId))
+                      && index.fragments().isPresent()) {
+                    covered.addAll(index.fragments().get());
+                  }
+                }
+              }
+              covered.retainAll(fragmentRowCounts.keySet());
+              if (!covered.isEmpty()) {
+                monthCoveredFragments = covered;
+                Map<Integer, Long> matchedCounts = new HashMap<>();
+                try (LanceScanner scanner =
+                        dataset.newScan(
+                            new ScanOptions.Builder()
+                                .fragmentIds(new ArrayList<>(covered))
+                                .columns(Collections.singletonList("month"))
+                                .filter(monthWhere.get())
+                                .withRowId(true)
+                                .useScalarIndex(true)
+                                .batchSize(65536)
+                                .build());
+                    ArrowReader reader = scanner.scanBatches()) {
+                  while (reader.loadNextBatch()) {
+                    UInt8Vector rowIdVec =
+                        (UInt8Vector) reader.getVectorSchemaRoot().getVector("_rowid");
+                    int count = rowIdVec.getValueCount();
+                    for (int i = 0; i < count; i++) {
+                      if (!rowIdVec.isNull(i)) {
+                        long rowId = rowIdVec.get(i);
+                        int fragId = (int) (rowId >>> 32);
+                        matchedCounts.merge(fragId, 1L, Long::sum);
+                      }
+                    }
+                  }
+                }
+                monthCoveredHasMatches = !matchedCounts.isEmpty();
+                Set<Integer> monthSurviving = new HashSet<>();
+                for (Integer fragId : fragmentRowCounts.keySet()) {
+                  if (covered.contains(fragId)) {
+                    long c = matchedCounts.getOrDefault(fragId, 0L);
+                    fragmentRowCounts.put(fragId, c);
+                    if (c > 0) {
+                      monthSurviving.add(fragId);
+                    }
+                  } else {
+                    monthSurviving.add(fragId);
+                  }
+                }
+                if (survivingFragmentIds == null) {
+                  survivingFragmentIds = monthSurviving;
+                } else {
+                  survivingFragmentIds = new HashSet<>(survivingFragmentIds);
+                  survivingFragmentIds.retainAll(monthSurviving);
+                }
+                LOG.info(
+                    "Month bitmap index pruning: {} of {} covered fragments matched {},"
+                        + " {} total surviving fragments",
+                    matchedCounts.size(),
+                    covered.size(),
+                    monthWhere.get(),
+                    survivingFragmentIds.size());
+              }
+            } catch (Exception e) {
+              LOG.warn("Failed to prune fragments by month bitmap index: {}", e.getMessage());
+            }
+          }
+        }
+      }
+
+      List<LanceSplit> splits = scanPlan.getSplits();
+      boolean canTwoPhaseSlice =
+          !pushedAggregation.isPresent()
+              && !limit.isPresent()
+              && !offset.isPresent()
+              && !topNSortOrders.isPresent()
+              && !schema.isEmpty()
+              && Arrays.stream(schema.fields())
+                  .noneMatch(f -> f.name().startsWith("_") || f.name().contains("."))
+              && BlobUtils.blobV2ColumnNames(schema).isEmpty()
+              && Arrays.stream(schema.fields()).noneMatch(BlobUtils::isBlobSparkField);
+      int maxRowsPerSplit = resolvedReadOptions.getMaxRowsPerSplit();
+      if (canTwoPhaseSlice && maxRowsPerSplit > 0) {
+        long totalActiveRows = 0L;
+        for (LanceSplit split : splits) {
+          if (split.getFragments().size() == 1) {
+            int fragId = split.getFragments().get(0);
+            if (survivingFragmentIds != null && !survivingFragmentIds.contains(fragId)) {
+              continue;
+            }
+            boolean skipUnindexedSlice =
+                monthCoveredFragments != null
+                    && monthCoveredHasMatches
+                    && !monthCoveredFragments.contains(fragId);
+            if (!skipUnindexedSlice) {
+              totalActiveRows += fragmentRowCounts.getOrDefault(fragId, 0L);
+            }
+          }
+        }
+        long effectiveMaxRowsPerSplit =
+            Math.min(
+                Math.max((long) maxRowsPerSplit, 524288L),
+                Math.max((long) maxRowsPerSplit, totalActiveRows / 512L));
+        List<LanceSplit> expandedSplits = new ArrayList<>(splits.size());
+        for (LanceSplit split : splits) {
+          if (split.getFragments().size() != 1) {
+            expandedSplits.add(split);
+            continue;
+          }
+          int fragId = split.getFragments().get(0);
+          if (survivingFragmentIds != null && !survivingFragmentIds.contains(fragId)) {
+            continue;
+          }
+          boolean skipUnindexedSlice =
+              monthCoveredFragments != null
+                  && monthCoveredHasMatches
+                  && !monthCoveredFragments.contains(fragId);
+          long rows = fragmentRowCounts.getOrDefault(fragId, 0L);
+          int numSlices =
+              (!skipUnindexedSlice && rows > effectiveMaxRowsPerSplit)
+                  ? (int)
+                      Math.min(
+                          16L, (rows + effectiveMaxRowsPerSplit - 1) / effectiveMaxRowsPerSplit)
+                  : 1;
+          for (int s = 0; s < numSlices; s++) {
+            expandedSplits.add(
+                new LanceSplit(
+                    Collections.singletonList(fragId), s, numSlices, skipUnindexedSlice));
+          }
+        }
+        LOG.info(
+            "Expanded splits with effectiveMaxRowsPerSplit={} (configured={}):"
+                + " {} base fragments -> {} splits",
+            effectiveMaxRowsPerSplit,
+            maxRowsPerSplit,
+            splits.size(),
+            expandedSplits.size());
+        splits = expandedSplits;
+      }
       Optional<String> whereCondition =
           FilterPushDown.compileFiltersToSqlWhereClause(pushedPredicates);
       if (countFilter.isPresent()) {
@@ -349,8 +592,8 @@ public class LanceScanBuilder
           pushedPredicates,
           statistics,
           survivingFragmentIds,
-          scanPlan.getSplits(),
-          scanPlan.getFragmentRowCounts(),
+          splits,
+          fragmentRowCounts,
           activeShardingExpression,
           fragmentShardingKeys,
           initialStorageOptions,

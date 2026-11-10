@@ -30,13 +30,40 @@ public class LanceSplit implements Serializable {
   private static final long serialVersionUID = 2983749283749283749L;
 
   private final List<Integer> fragments;
+  private final int sliceIndex;
+  private final int numSlices;
+  private final boolean unindexedMonthProbe;
 
   public LanceSplit(List<Integer> fragments) {
+    this(fragments, 0, 1, false);
+  }
+
+  public LanceSplit(List<Integer> fragments, int sliceIndex, int numSlices) {
+    this(fragments, sliceIndex, numSlices, false);
+  }
+
+  public LanceSplit(
+      List<Integer> fragments, int sliceIndex, int numSlices, boolean unindexedMonthProbe) {
     this.fragments = fragments;
+    this.sliceIndex = Math.max(0, sliceIndex);
+    this.numSlices = Math.max(1, numSlices);
+    this.unindexedMonthProbe = unindexedMonthProbe;
   }
 
   public List<Integer> getFragments() {
     return fragments;
+  }
+
+  public int getSliceIndex() {
+    return sliceIndex;
+  }
+
+  public int getNumSlices() {
+    return numSlices;
+  }
+
+  public boolean isUnindexedMonthProbe() {
+    return unindexedMonthProbe;
   }
 
   /** Result of scan planning containing splits, resolved version, and per-fragment row counts. */

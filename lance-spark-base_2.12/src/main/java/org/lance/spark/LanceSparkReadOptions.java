@@ -25,7 +25,9 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -60,6 +62,9 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
+  public static final String CONFIG_TWO_PHASE_MONTH_READ = "two_phase_month_read";
+  public static final String CONFIG_MAX_ROWS_PER_SPLIT = "max_rows_per_split";
+  public static final String CONFIG_COALESCE_COLUMNS = "coalesce_columns";
   public static final String CONFIG_TOP_N_PUSH_DOWN = "topN_push_down";
   public static final String CONFIG_NEAREST = "nearest";
   public static final String CONFIG_FULL_TEXT_QUERY = "fullTextQuery";
@@ -121,6 +126,9 @@ public class LanceSparkReadOptions implements Serializable {
   private final int batchSize;
   private transient FullTextQuery fullTextQuery;
   private final boolean useScalarIndex;
+  private final boolean twoPhaseMonthRead;
+  private final int maxRowsPerSplit;
+  private final Map<String, String> coalesceColumns;
   private final boolean topNPushDown;
   private final Map<String, String> storageOptions;
 
@@ -157,6 +165,10 @@ public class LanceSparkReadOptions implements Serializable {
     this.batchSize = builder.batchSize;
     this.fullTextQuery = builder.fullTextQuery;
     this.useScalarIndex = builder.useScalarIndex;
+    this.twoPhaseMonthRead = builder.twoPhaseMonthRead;
+    this.maxRowsPerSplit = builder.maxRowsPerSplit;
+    this.coalesceColumns =
+        Collections.unmodifiableMap(new LinkedHashMap<>(builder.coalesceColumns));
     this.topNPushDown = builder.topNPushDown;
     this.storageOptions = new HashMap<>(builder.storageOptions);
     this.namespace = builder.namespace;
@@ -166,6 +178,42 @@ public class LanceSparkReadOptions implements Serializable {
     this.metadataCacheBackend = builder.metadataCacheBackend;
     this.executorCredentialRefresh = builder.executorCredentialRefresh;
     this.arrowBatchReads = builder.arrowBatchReads;
+  }
+
+  private static String stripQuotes(String s) {
+    if (s == null) {
+      return "";
+    }
+    String res = s.trim();
+    while (res.length() >= 2
+        && ((res.startsWith("'") && res.endsWith("'"))
+            || (res.startsWith("\"") && res.endsWith("\"")))) {
+      res = res.substring(1, res.length() - 1).trim();
+    }
+    return res;
+  }
+
+  public static Map<String, String> parseCoalesceColumns(String spec) {
+    String cleanSpec = stripQuotes(spec);
+    if (cleanSpec.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    Map<String, String> map = new LinkedHashMap<>();
+    for (String entry : cleanSpec.split(",")) {
+      String trimmed = stripQuotes(entry);
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      int idx = trimmed.indexOf(':');
+      if (idx > 0 && idx < trimmed.length() - 1) {
+        String primary = stripQuotes(trimmed.substring(0, idx));
+        String fallback = stripQuotes(trimmed.substring(idx + 1));
+        if (!primary.isEmpty() && !fallback.isEmpty()) {
+          map.put(primary, fallback);
+        }
+      }
+    }
+    return map;
   }
 
   /** Creates a new builder for LanceSparkReadOptions. */
@@ -270,6 +318,18 @@ public class LanceSparkReadOptions implements Serializable {
     return useScalarIndex;
   }
 
+  public boolean isTwoPhaseMonthRead() {
+    return twoPhaseMonthRead;
+  }
+
+  public int getMaxRowsPerSplit() {
+    return maxRowsPerSplit;
+  }
+
+  public Map<String, String> getCoalesceColumns() {
+    return coalesceColumns;
+  }
+
   public boolean isTopNPushDown() {
     return topNPushDown;
   }
@@ -354,6 +414,9 @@ public class LanceSparkReadOptions implements Serializable {
         .batchSize(this.batchSize)
         .fullTextQuery(this.fullTextQuery)
         .useScalarIndex(this.useScalarIndex)
+        .twoPhaseMonthRead(this.twoPhaseMonthRead)
+        .maxRowsPerSplit(this.maxRowsPerSplit)
+        .coalesceColumns(this.coalesceColumns)
         .topNPushDown(this.topNPushDown)
         .storageOptions(this.storageOptions)
         .namespace(this.namespace)
@@ -363,6 +426,25 @@ public class LanceSparkReadOptions implements Serializable {
         .metadataCacheBackend(this.metadataCacheBackend)
         .executorCredentialRefresh(this.executorCredentialRefresh)
         .arrowBatchReads(this.arrowBatchReads);
+  }
+
+  /**
+   * Returns a copy of these options with the two-phase month read flag set.
+   *
+   * @param enabled whether month-filtered scans should read row IDs first and fetch the projection
+   *     afterwards
+   * @return a new LanceSparkReadOptions with the requested flag
+   */
+  public LanceSparkReadOptions withTwoPhaseMonthRead(boolean enabled) {
+    return toBuilder().twoPhaseMonthRead(enabled).build();
+  }
+
+  public LanceSparkReadOptions withMaxRowsPerSplit(int maxRowsPerSplit) {
+    return toBuilder().maxRowsPerSplit(maxRowsPerSplit).build();
+  }
+
+  public LanceSparkReadOptions withCoalesceColumns(Map<String, String> coalesceColumns) {
+    return toBuilder().coalesceColumns(coalesceColumns).build();
   }
 
   /**
@@ -411,10 +493,13 @@ public class LanceSparkReadOptions implements Serializable {
     return pushDownFilters == that.pushDownFilters
         && batchSize == that.batchSize
         && useScalarIndex == that.useScalarIndex
+        && twoPhaseMonthRead == that.twoPhaseMonthRead
+        && maxRowsPerSplit == that.maxRowsPerSplit
         && topNPushDown == that.topNPushDown
         && executorCredentialRefresh == that.executorCredentialRefresh
         && arrowBatchReads == that.arrowBatchReads
         && FullTextQueryUtils.equals(fullTextQuery, that.fullTextQuery)
+        && Objects.equals(coalesceColumns, that.coalesceColumns)
         && Objects.equals(datasetUri, that.datasetUri)
         && Objects.equals(blockSize, that.blockSize)
         && Objects.equals(ref, that.ref)
@@ -439,6 +524,9 @@ public class LanceSparkReadOptions implements Serializable {
         batchSize,
         FullTextQueryUtils.fullTextQueryToString(fullTextQuery),
         useScalarIndex,
+        twoPhaseMonthRead,
+        maxRowsPerSplit,
+        coalesceColumns,
         topNPushDown,
         storageOptions,
         tableId,
@@ -460,6 +548,9 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
+    private boolean twoPhaseMonthRead = false;
+    private int maxRowsPerSplit = 0;
+    private Map<String, String> coalesceColumns = Collections.emptyMap();
     private boolean topNPushDown = DEFAULT_TOP_N_PUSH_DOWN;
     private Map<String, String> storageOptions = new HashMap<>();
     private LanceNamespace namespace;
@@ -514,6 +605,22 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder useScalarIndex(boolean useScalarIndex) {
       this.useScalarIndex = useScalarIndex;
+      return this;
+    }
+
+    public Builder twoPhaseMonthRead(boolean twoPhaseMonthRead) {
+      this.twoPhaseMonthRead = twoPhaseMonthRead;
+      return this;
+    }
+
+    public Builder maxRowsPerSplit(int maxRowsPerSplit) {
+      this.maxRowsPerSplit = Math.max(0, maxRowsPerSplit);
+      return this;
+    }
+
+    public Builder coalesceColumns(Map<String, String> coalesceColumns) {
+      this.coalesceColumns =
+          coalesceColumns == null ? Collections.emptyMap() : new LinkedHashMap<>(coalesceColumns);
       return this;
     }
 
@@ -643,6 +750,15 @@ public class LanceSparkReadOptions implements Serializable {
       }
       if (opts.containsKey(CONFIG_USE_SCALAR_INDEX)) {
         this.useScalarIndex = Boolean.parseBoolean(opts.get(CONFIG_USE_SCALAR_INDEX));
+      }
+      if (opts.containsKey(CONFIG_TWO_PHASE_MONTH_READ)) {
+        this.twoPhaseMonthRead = Boolean.parseBoolean(opts.get(CONFIG_TWO_PHASE_MONTH_READ));
+      }
+      if (opts.containsKey(CONFIG_MAX_ROWS_PER_SPLIT)) {
+        this.maxRowsPerSplit = Math.max(0, Integer.parseInt(opts.get(CONFIG_MAX_ROWS_PER_SPLIT)));
+      }
+      if (opts.containsKey(CONFIG_COALESCE_COLUMNS)) {
+        this.coalesceColumns = parseCoalesceColumns(opts.get(CONFIG_COALESCE_COLUMNS));
       }
       if (opts.containsKey(CONFIG_EXECUTOR_CREDENTIAL_REFRESH)) {
         this.executorCredentialRefresh =
