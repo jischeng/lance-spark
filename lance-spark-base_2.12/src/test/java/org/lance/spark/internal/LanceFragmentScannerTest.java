@@ -13,6 +13,8 @@
  */
 package org.lance.spark.internal;
 
+import org.lance.ipc.MaterializationStyle;
+import org.lance.ipc.ScanOptions;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DescribeTableResponse;
@@ -322,6 +324,54 @@ public class LanceFragmentScannerTest {
                               .build())
                     }));
     assertEquals(java.util.Collections.singleton("payload"), names);
+  }
+
+  @Test
+  public void testBuildScanOptionsForwardsMemoryAndMaterializationSettings() throws Exception {
+    LanceSparkReadOptions readOptions =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .batchSize(128)
+            .batchSizeBytes(4_194_304L)
+            .batchReadahead(2)
+            .fragmentReadahead(3)
+            .ioBufferSize(33_554_432L)
+            .lateMaterialization("all_late")
+            .build();
+    LanceInputPartition partition =
+        new LanceInputPartition(
+            TestUtils.TestTable1Config.schema,
+            0,
+            new LanceSplit(Collections.singletonList(0)),
+            readOptions,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            "testScanOptionsForwarding",
+            Collections.emptyMap(),
+            null,
+            null,
+            null);
+
+    ScanOptions scanOptions = LanceFragmentScanner.buildScanOptions(partition);
+    assertEquals(java.util.Optional.of(128L), scanOptions.getBatchSize());
+    assertEquals(java.util.Optional.of(4_194_304L), scanOptions.getBatchSizeBytes());
+    assertEquals(2, scanOptions.getBatchReadahead());
+    assertEquals(java.util.Optional.of(3), scanOptions.getFragmentReadahead());
+    assertEquals(java.util.Optional.of(33_554_432L), scanOptions.getIoBufferSize());
+    assertEquals(
+        MaterializationStyle.Mode.ALL_LATE, scanOptions.getLateMaterialization().get().getMode());
+
+    long totalRows = 0;
+    try (LanceFragmentScanner scanner = LanceFragmentScanner.create(0, partition);
+        org.apache.arrow.vector.ipc.ArrowReader reader = scanner.getArrowReader()) {
+      while (reader.loadNextBatch()) {
+        totalRows += reader.getVectorSchemaRoot().getRowCount();
+      }
+    }
+    org.junit.jupiter.api.Assertions.assertTrue(totalRows > 0);
   }
 
   /**

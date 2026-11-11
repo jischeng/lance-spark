@@ -355,6 +355,11 @@ These options control how data is read from Lance datasets. They can be set usin
 | Option                | Type    | Default | Description                                                                                                       |
 |-----------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------|
 | `batch_size`          | Integer | `8192`  | Number of rows to read per batch during scanning. Larger values may improve throughput but increase memory usage. |
+| `batch_size_bytes`    | Long    | -       | Target maximum byte size per decoded batch. When set alongside `batch_size`, the scanner uses the smaller limit.  |
+| `batch_readahead`     | Integer | `16`    | Number of batches to decode concurrently per scanner. Lower values bound executor memory on wide columns.         |
+| `fragment_readahead`  | Integer | -       | Number of fragments to read concurrently in multi-fragment dataset scans.                                         |
+| `io_buffer_size`      | Long    | -       | Maximum bytes allowed to queue up in the native scanner I/O buffer.                                               |
+| `late_materialization`| String  | -       | Materialization strategy (`heuristic`, `all_late`, `all_early`, or `all_early_except:<col1>,<col2>`).             |
 | `use_scalar_index`    | Boolean | `true`  | Whether to use scalar indices (e.g. btree) for filter acceleration during scanning.                               |
 | `version`             | Integer | Latest  | Specific dataset version to read. If not specified, reads the latest version.                                     |
 | `branch`              | String  | Main    | Named branch to read. Reads the current head. Do not set with `tag` or `version`.                                 |

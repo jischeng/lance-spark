@@ -83,56 +83,12 @@ public class LanceFragmentScanner implements AutoCloseable {
                 "Fragment %d not found in dataset at %s (version=%s)",
                 fragmentId, readOptions.getDatasetUri(), readOptions.getRef()));
       }
-      ScanOptions.Builder scanOptions = new ScanOptions.Builder();
-
       StructType scanSchema = inputPartition.getSchema();
       Set<String> blobColumnNames = getBlobColumnNames(scanSchema);
-      boolean hasBlobColumns = !blobColumnNames.isEmpty();
-
-      List<String> projectedColumns = getColumnNames(scanSchema);
-      if (readOptions.getFullTextQuery() != null
-          && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
-        projectedColumns.add(LanceConstant.SCORE);
-      }
-      if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
-        scanOptions.withRowId(true);
-      }
-      if (hasField(scanSchema, LanceConstant.ROW_ID)) {
-        scanOptions.withRowId(true);
-      }
-
-      // Request _rowaddr when blob columns are present so we can build blob references.
-      boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
-      if (hasBlobColumns || userRequestedRowAddr) {
-        scanOptions.withRowAddress(true);
-      }
-
-      scanOptions.columns(projectedColumns);
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptions.filter(inputPartition.getWhereCondition().get());
-      }
-      scanOptions.batchSize(readOptions.getBatchSize());
-      if (readOptions.getFullTextQuery() != null) {
-        scanOptions.fullTextQuery(readOptions.getFullTextQuery());
-        scanOptions.prefilter(true);
-        scanOptions.disableScoringAutoprojection(true);
-      }
-      scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
-      if (inputPartition.getLimit().isPresent()) {
-        scanOptions.limit(inputPartition.getLimit().get());
-      }
-      if (inputPartition.getOffset().isPresent()) {
-        scanOptions.offset(inputPartition.getOffset().get());
-      }
-      if (inputPartition.getTopNSortOrders().isPresent()) {
-        scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
-      }
-
-      // Collect scan stats
-      scanOptions.collectStats(true);
+      ScanOptions builtScanOptions = buildScanOptions(scanSchema, blobColumnNames, inputPartition);
 
       long scanCreateStart = System.nanoTime();
-      lanceScanner = fragment.newScan(scanOptions.build());
+      lanceScanner = fragment.newScan(builtScanOptions);
       long scanCreateTimeNs = System.nanoTime() - scanCreateStart;
       return new LanceFragmentScanner(
           dataset,
@@ -159,6 +115,76 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
       throw new RuntimeException(throwable);
     }
+  }
+
+  static ScanOptions buildScanOptions(LanceInputPartition inputPartition) {
+    StructType scanSchema = inputPartition.getSchema();
+    return buildScanOptions(scanSchema, getBlobColumnNames(scanSchema), inputPartition);
+  }
+
+  private static ScanOptions buildScanOptions(
+      StructType scanSchema, Set<String> blobColumnNames, LanceInputPartition inputPartition) {
+    LanceSparkReadOptions readOptions = inputPartition.getReadOptions();
+    ScanOptions.Builder scanOptions = new ScanOptions.Builder();
+    boolean hasBlobColumns = !blobColumnNames.isEmpty();
+
+    List<String> projectedColumns = getColumnNames(scanSchema);
+    if (readOptions.getFullTextQuery() != null
+        && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
+      projectedColumns.add(LanceConstant.SCORE);
+    }
+    if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
+      scanOptions.withRowId(true);
+    }
+    if (hasField(scanSchema, LanceConstant.ROW_ID)) {
+      scanOptions.withRowId(true);
+    }
+
+    // Request _rowaddr when blob columns are present so we can build blob references.
+    boolean userRequestedRowAddr = hasField(scanSchema, LanceConstant.ROW_ADDRESS);
+    if (hasBlobColumns || userRequestedRowAddr) {
+      scanOptions.withRowAddress(true);
+    }
+
+    scanOptions.columns(projectedColumns);
+    if (inputPartition.getWhereCondition().isPresent()) {
+      scanOptions.filter(inputPartition.getWhereCondition().get());
+    }
+    scanOptions.batchSize(readOptions.getBatchSize());
+    if (readOptions.getBatchSizeBytes() != null) {
+      scanOptions.batchSizeBytes(readOptions.getBatchSizeBytes());
+    }
+    if (readOptions.getBatchReadahead() != null) {
+      scanOptions.batchReadahead(readOptions.getBatchReadahead());
+    }
+    if (readOptions.getFragmentReadahead() != null) {
+      scanOptions.fragmentReadahead(readOptions.getFragmentReadahead());
+    }
+    if (readOptions.getIoBufferSize() != null) {
+      scanOptions.ioBufferSize(readOptions.getIoBufferSize());
+    }
+    if (readOptions.getLateMaterialization() != null) {
+      scanOptions.lateMaterialization(readOptions.toMaterializationStyle());
+    }
+    if (readOptions.getFullTextQuery() != null) {
+      scanOptions.fullTextQuery(readOptions.getFullTextQuery());
+      scanOptions.prefilter(true);
+      scanOptions.disableScoringAutoprojection(true);
+    }
+    scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
+    if (inputPartition.getLimit().isPresent()) {
+      scanOptions.limit(inputPartition.getLimit().get());
+    }
+    if (inputPartition.getOffset().isPresent()) {
+      scanOptions.offset(inputPartition.getOffset().get());
+    }
+    if (inputPartition.getTopNSortOrders().isPresent()) {
+      scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
+    }
+
+    // Collect scan stats
+    scanOptions.collectStats(true);
+    return scanOptions.build();
   }
 
   /**

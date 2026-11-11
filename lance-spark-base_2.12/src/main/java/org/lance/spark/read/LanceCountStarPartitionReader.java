@@ -88,6 +88,15 @@ public class LanceCountStarPartitionReader implements PartitionReader<ColumnarBa
 
       ScanOptions.Builder scanOptionsBuilder = new ScanOptions.Builder();
       scanOptionsBuilder.useScalarIndex(readOptions.isUseScalarIndex());
+      if (readOptions.getBatchReadahead() != null) {
+        scanOptionsBuilder.batchReadahead(readOptions.getBatchReadahead());
+      }
+      if (readOptions.getFragmentReadahead() != null) {
+        scanOptionsBuilder.fragmentReadahead(readOptions.getFragmentReadahead());
+      }
+      if (readOptions.getIoBufferSize() != null) {
+        scanOptionsBuilder.ioBufferSize(readOptions.getIoBufferSize());
+      }
       if (inputPartition.getWhereCondition().isPresent()) {
         scanOptionsBuilder.filter(inputPartition.getWhereCondition().get());
       }
