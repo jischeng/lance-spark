@@ -313,6 +313,24 @@ public class LanceScanBuilder
                 .orElse(null);
       }
 
+      Map<Integer, Long> narrowedFragmentRowCounts = scanPlan.getFragmentRowCounts();
+      if (readOptions.isUseScalarIndex() && pushedPredicates.length > 0) {
+        java.util.Optional<ScalarIndexFragmentPruner.PruneResult> scalarPruned =
+            ScalarIndexFragmentPruner.pruneFragments(
+                dataset, pushedPredicates, scanPlan.getFragmentRowCounts());
+        if (scalarPruned.isPresent()) {
+          Set<Integer> scalarSurviving = scalarPruned.get().getSurvivingFragments();
+          narrowedFragmentRowCounts = scalarPruned.get().getNarrowedFragmentRowCounts();
+          if (survivingFragmentIds == null) {
+            survivingFragmentIds = scalarSurviving;
+          } else {
+            Set<Integer> intersected = new HashSet<>(survivingFragmentIds);
+            intersected.retainAll(scalarSurviving);
+            survivingFragmentIds = Collections.unmodifiableSet(intersected);
+          }
+        }
+      }
+
       // Spark re-runs a partially pushed COUNT(*) as SUM over this scan's per-partition counts, so
       // a scan that plans no partition leaves SUM with zero rows and it yields NULL instead of 0.
       // Answering 0 is safe here: pruning never drops a fragment that could match.
@@ -330,11 +348,11 @@ public class LanceScanBuilder
       // (when the projected schema is narrower than the full schema).
       long projectedRows = summary.getTotalRows();
       long projectedFullSize = summary.getTotalFilesSize();
-      if (survivingFragmentIds != null && !scanPlan.getFragmentRowCounts().isEmpty()) {
+      if (survivingFragmentIds != null && !narrowedFragmentRowCounts.isEmpty()) {
+        final Map<Integer, Long> estimatedRowCounts = narrowedFragmentRowCounts;
         long survivingRows =
             survivingFragmentIds.stream()
-                .mapToLong(
-                    fragmentId -> scanPlan.getFragmentRowCounts().getOrDefault(fragmentId, 0L))
+                .mapToLong(fragmentId -> estimatedRowCounts.getOrDefault(fragmentId, 0L))
                 .sum();
         LanceStatistics postPruning =
             LanceStatistics.estimatePostPruningByRows(
@@ -390,7 +408,7 @@ public class LanceScanBuilder
               .map(FieldReference::column)
               .toArray(NamedReference[]::new),
           scanPlan.getSplits(),
-          scanPlan.getFragmentRowCounts(),
+          narrowedFragmentRowCounts,
           activeShardingExpression,
           activeShardingColumn,
           fragmentShardingKeys,

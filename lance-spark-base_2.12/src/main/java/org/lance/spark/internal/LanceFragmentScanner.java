@@ -15,9 +15,11 @@ package org.lance.spark.internal;
 
 import org.lance.Dataset;
 import org.lance.Fragment;
+import org.lance.index.Index;
 import org.lance.ipc.LanceScanner;
 import org.lance.ipc.ScanOptions;
 import org.lance.ipc.ScanStats;
+import org.lance.schema.LanceField;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
@@ -31,10 +33,14 @@ import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class LanceFragmentScanner implements AutoCloseable {
@@ -108,8 +114,13 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
 
       scanOptions.columns(projectedColumns);
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptions.filter(inputPartition.getWhereCondition().get());
+      org.lance.spark.utils.Optional<String> rawWhere = inputPartition.getWhereCondition();
+      boolean effectiveUseScalarIndex = readOptions.isUseScalarIndex();
+      if (effectiveUseScalarIndex && rawWhere.isPresent()) {
+        effectiveUseScalarIndex = hasCoveringIndexForFragment(dataset, fragmentId, rawWhere.get());
+      }
+      if (rawWhere.isPresent()) {
+        scanOptions.filter(rawWhere.get());
       }
       scanOptions.batchSize(readOptions.getBatchSize());
       if (readOptions.getFullTextQuery() != null) {
@@ -117,7 +128,7 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.prefilter(true);
         scanOptions.disableScoringAutoprojection(true);
       }
-      scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
+      scanOptions.useScalarIndex(effectiveUseScalarIndex);
       if (inputPartition.getLimit().isPresent()) {
         scanOptions.limit(inputPartition.getLimit().get());
       }
@@ -305,6 +316,56 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
     }
     return false;
+  }
+
+  private static final Pattern IDENTIFIER_PATTERN =
+      Pattern.compile("`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*)");
+
+  static boolean hasCoveringIndexForFragment(Dataset dataset, int fragmentId, String whereClause) {
+    try {
+      Map<String, Integer> nameToFieldId = new HashMap<>();
+      for (LanceField field : dataset.getLanceSchema().fields()) {
+        nameToFieldId.put(field.getName(), field.getId());
+      }
+      Set<Integer> referencedFieldIds = new HashSet<>();
+      Matcher matcher = IDENTIFIER_PATTERN.matcher(whereClause);
+      while (matcher.find()) {
+        String token = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+        Integer fieldId = nameToFieldId.get(token);
+        if (fieldId != null) {
+          referencedFieldIds.add(fieldId);
+        }
+      }
+      if (referencedFieldIds.isEmpty()) {
+        return true;
+      }
+      List<Index> indexes = dataset.getIndexes();
+      if (indexes == null || indexes.isEmpty()) {
+        return false;
+      }
+      for (Index index : indexes) {
+        List<Integer> indexFields = index.fields();
+        if (indexFields == null) {
+          continue;
+        }
+        boolean touchesFilter = false;
+        for (Integer fid : indexFields) {
+          if (referencedFieldIds.contains(fid)) {
+            touchesFilter = true;
+            break;
+          }
+        }
+        if (!touchesFilter) {
+          continue;
+        }
+        if (!index.fragments().isPresent() || index.fragments().get().contains(fragmentId)) {
+          return true;
+        }
+      }
+      return false;
+    } catch (Exception e) {
+      return true;
+    }
   }
 
   public Optional<ScanStats> getScanStats() {
