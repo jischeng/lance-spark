@@ -59,6 +59,9 @@ public class LanceSparkReadOptions implements Serializable {
   public static final String CONFIG_INDEX_CACHE_SIZE = "index_cache_size";
   public static final String CONFIG_METADATA_CACHE_SIZE = "metadata_cache_size";
   public static final String CONFIG_BATCH_SIZE = "batch_size";
+  public static final String CONFIG_TARGET_SPLIT_SIZE = "target_split_size";
+  public static final String CONFIG_OPEN_COST_IN_BYTES = "open_cost_in_bytes";
+  public static final String CONFIG_MAX_ROWS_PER_SPLIT = "max_rows_per_split";
   public static final String CONFIG_USE_SCALAR_INDEX = "use_scalar_index";
   public static final String CONFIG_RUNTIME_FILTER_MAX_KEYS = "runtime_filter_max_keys";
   public static final String CONFIG_RUNTIME_FILTER_MAX_BYTES = "runtime_filter_max_bytes";
@@ -123,6 +126,9 @@ public class LanceSparkReadOptions implements Serializable {
   private final Integer indexCacheSize;
   private final Integer metadataCacheSize;
   private final int batchSize;
+  private final Long targetSplitSize;
+  private final Long openCostInBytes;
+  private final Long maxRowsPerSplit;
   private transient FullTextQuery fullTextQuery;
   private final boolean useScalarIndex;
   private final int runtimeFilterMaxKeys;
@@ -161,6 +167,9 @@ public class LanceSparkReadOptions implements Serializable {
     this.indexCacheSize = builder.indexCacheSize;
     this.metadataCacheSize = builder.metadataCacheSize;
     this.batchSize = builder.batchSize;
+    this.targetSplitSize = builder.targetSplitSize;
+    this.openCostInBytes = builder.openCostInBytes;
+    this.maxRowsPerSplit = builder.maxRowsPerSplit;
     this.fullTextQuery = builder.fullTextQuery;
     this.useScalarIndex = builder.useScalarIndex;
     this.runtimeFilterMaxKeys = builder.runtimeFilterMaxKeys;
@@ -270,6 +279,18 @@ public class LanceSparkReadOptions implements Serializable {
     return batchSize;
   }
 
+  public Long getTargetSplitSize() {
+    return targetSplitSize;
+  }
+
+  public Long getOpenCostInBytes() {
+    return openCostInBytes;
+  }
+
+  public Long getMaxRowsPerSplit() {
+    return maxRowsPerSplit;
+  }
+
   public FullTextQuery getFullTextQuery() {
     return fullTextQuery;
   }
@@ -368,6 +389,9 @@ public class LanceSparkReadOptions implements Serializable {
         .indexCacheSize(this.indexCacheSize)
         .metadataCacheSize(this.metadataCacheSize)
         .batchSize(this.batchSize)
+        .targetSplitSize(this.targetSplitSize)
+        .openCostInBytes(this.openCostInBytes)
+        .maxRowsPerSplit(this.maxRowsPerSplit)
         .fullTextQuery(this.fullTextQuery)
         .useScalarIndex(this.useScalarIndex)
         .runtimeFilterMaxKeys(this.runtimeFilterMaxKeys)
@@ -440,6 +464,9 @@ public class LanceSparkReadOptions implements Serializable {
         && Objects.equals(ref, that.ref)
         && Objects.equals(indexCacheSize, that.indexCacheSize)
         && Objects.equals(metadataCacheSize, that.metadataCacheSize)
+        && Objects.equals(targetSplitSize, that.targetSplitSize)
+        && Objects.equals(openCostInBytes, that.openCostInBytes)
+        && Objects.equals(maxRowsPerSplit, that.maxRowsPerSplit)
         && Objects.equals(storageOptions, that.storageOptions)
         && Objects.equals(tableId, that.tableId)
         && Objects.equals(catalogName, that.catalogName)
@@ -457,6 +484,9 @@ public class LanceSparkReadOptions implements Serializable {
         indexCacheSize,
         metadataCacheSize,
         batchSize,
+        targetSplitSize,
+        openCostInBytes,
+        maxRowsPerSplit,
         FullTextQueryUtils.fullTextQueryToString(fullTextQuery),
         useScalarIndex,
         runtimeFilterMaxKeys,
@@ -481,6 +511,9 @@ public class LanceSparkReadOptions implements Serializable {
     private Integer indexCacheSize;
     private Integer metadataCacheSize;
     private int batchSize = DEFAULT_BATCH_SIZE;
+    private Long targetSplitSize;
+    private Long openCostInBytes;
+    private Long maxRowsPerSplit;
     private boolean useScalarIndex = DEFAULT_USE_SCALAR_INDEX;
     private int runtimeFilterMaxKeys = DEFAULT_RUNTIME_FILTER_MAX_KEYS;
     private int runtimeFilterMaxBytes = DEFAULT_RUNTIME_FILTER_MAX_BYTES;
@@ -533,6 +566,28 @@ public class LanceSparkReadOptions implements Serializable {
 
     public Builder batchSize(int batchSize) {
       this.batchSize = batchSize;
+      return this;
+    }
+
+    public Builder targetSplitSize(Long targetSplitSize) {
+      Preconditions.checkArgument(
+          targetSplitSize == null || targetSplitSize > 0, "target_split_size must be positive");
+      this.targetSplitSize = targetSplitSize;
+      return this;
+    }
+
+    public Builder openCostInBytes(Long openCostInBytes) {
+      Preconditions.checkArgument(
+          openCostInBytes == null || openCostInBytes >= 0,
+          "open_cost_in_bytes must be non-negative");
+      this.openCostInBytes = openCostInBytes;
+      return this;
+    }
+
+    public Builder maxRowsPerSplit(Long maxRowsPerSplit) {
+      Preconditions.checkArgument(
+          maxRowsPerSplit == null || maxRowsPerSplit > 0, "max_rows_per_split must be positive");
+      this.maxRowsPerSplit = maxRowsPerSplit;
       return this;
     }
 
@@ -671,6 +726,15 @@ public class LanceSparkReadOptions implements Serializable {
         int parsedBatchSize = Integer.parseInt(opts.get(CONFIG_BATCH_SIZE));
         Preconditions.checkArgument(parsedBatchSize > 0, "batch_size must be positive");
         this.batchSize = parsedBatchSize;
+      }
+      if (references.containsKey(CONFIG_TARGET_SPLIT_SIZE)) {
+        targetSplitSize(Long.parseLong(references.get(CONFIG_TARGET_SPLIT_SIZE).trim()));
+      }
+      if (references.containsKey(CONFIG_OPEN_COST_IN_BYTES)) {
+        openCostInBytes(Long.parseLong(references.get(CONFIG_OPEN_COST_IN_BYTES).trim()));
+      }
+      if (references.containsKey(CONFIG_MAX_ROWS_PER_SPLIT)) {
+        maxRowsPerSplit(Long.parseLong(references.get(CONFIG_MAX_ROWS_PER_SPLIT).trim()));
       }
       if (opts.containsKey(CONFIG_TOP_N_PUSH_DOWN)) {
         this.topNPushDown = Boolean.parseBoolean(opts.get(CONFIG_TOP_N_PUSH_DOWN));

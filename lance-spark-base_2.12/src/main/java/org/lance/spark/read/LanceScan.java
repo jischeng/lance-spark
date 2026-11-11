@@ -27,6 +27,7 @@ import org.lance.spark.utils.Optional;
 
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.expressions.BucketTransform;
 import org.apache.spark.sql.connector.expressions.Expression;
@@ -53,6 +54,7 @@ import org.apache.spark.sql.connector.read.SupportsRuntimeV2Filtering;
 import org.apache.spark.sql.connector.read.partitioning.KeyGroupedPartitioning;
 import org.apache.spark.sql.connector.read.partitioning.Partitioning;
 import org.apache.spark.sql.connector.read.partitioning.UnknownPartitioning;
+import org.apache.spark.sql.internal.SQLConf;
 import org.apache.spark.sql.internal.connector.SupportsMetadata;
 import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
@@ -132,6 +134,10 @@ public class LanceScan
    * null}, which would NPE inside {@link #pruneByLimit}.
    */
   private final java.util.Map<Integer, Long> precomputedFragmentRowCounts;
+
+  private final java.util.Map<Integer, Long> precomputedFragmentPhysicalRows;
+
+  private final java.util.Map<Integer, Long> precomputedFragmentProjectedBytes;
 
   /** Number of partitions after pruning, set during {@link #planInputPartitions()}. */
   private transient int numPartitions = -1;
@@ -296,6 +302,125 @@ public class LanceScan
       boolean rowIdIsRowAddress,
       java.util.Map<String, Long> unsignedRuntimeKeyMax,
       ArrowBatchAdapter.Plan arrowBatchPlan) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
+        zonemapStats,
+        uncoveredFragmentsByColumn,
+        runtimeFilterAttributes,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        precomputedFragmentRowCounts,
+        null,
+        activeShardingExpression,
+        activeShardingColumn,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        rowIdIsRowAddress,
+        unsignedRuntimeKeyMax,
+        arrowBatchPlan);
+  }
+
+  /**
+   * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
+   *     null if it has none
+   */
+  public LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      java.util.Map<String, List<ZoneStats>> zonemapStats,
+      java.util.Map<String, Set<Integer>> uncoveredFragmentsByColumn,
+      NamedReference[] runtimeFilterAttributes,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      java.util.Map<Integer, Long> precomputedFragmentPhysicalRows,
+      Expression activeShardingExpression,
+      String activeShardingColumn,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties,
+      boolean rowIdIsRowAddress,
+      java.util.Map<String, Long> unsignedRuntimeKeyMax,
+      ArrowBatchAdapter.Plan arrowBatchPlan) {
+    this(
+        schema,
+        readOptions,
+        whereConditions,
+        limit,
+        offset,
+        topNSortOrders,
+        pushedAggregation,
+        pushedPredicates,
+        statistics,
+        survivingFragmentIds,
+        zonemapStats,
+        uncoveredFragmentsByColumn,
+        runtimeFilterAttributes,
+        precomputedSplits,
+        precomputedFragmentRowCounts,
+        precomputedFragmentPhysicalRows,
+        null,
+        activeShardingExpression,
+        activeShardingColumn,
+        fragmentShardingKeys,
+        initialStorageOptions,
+        namespaceImpl,
+        namespaceProperties,
+        rowIdIsRowAddress,
+        unsignedRuntimeKeyMax,
+        arrowBatchPlan);
+  }
+
+  /**
+   * @param arrowBatchPlan the Arrow batches the scan can emit (see {@link #arrowBatchSchema()}), or
+   *     null if it has none
+   */
+  public LanceScan(
+      StructType schema,
+      LanceSparkReadOptions readOptions,
+      Optional<String> whereConditions,
+      Optional<Integer> limit,
+      Optional<Integer> offset,
+      Optional<List<ColumnOrdering>> topNSortOrders,
+      Optional<Aggregation> pushedAggregation,
+      Predicate[] pushedPredicates,
+      LanceStatistics statistics,
+      Set<Integer> survivingFragmentIds,
+      java.util.Map<String, List<ZoneStats>> zonemapStats,
+      java.util.Map<String, Set<Integer>> uncoveredFragmentsByColumn,
+      NamedReference[] runtimeFilterAttributes,
+      List<LanceSplit> precomputedSplits,
+      java.util.Map<Integer, Long> precomputedFragmentRowCounts,
+      java.util.Map<Integer, Long> precomputedFragmentPhysicalRows,
+      java.util.Map<Integer, Long> precomputedFragmentProjectedBytes,
+      Expression activeShardingExpression,
+      String activeShardingColumn,
+      java.util.Map<Integer, Object> fragmentShardingKeys,
+      java.util.Map<String, String> initialStorageOptions,
+      String namespaceImpl,
+      java.util.Map<String, String> namespaceProperties,
+      boolean rowIdIsRowAddress,
+      java.util.Map<String, Long> unsignedRuntimeKeyMax,
+      ArrowBatchAdapter.Plan arrowBatchPlan) {
     this.schema = schema;
     this.arrowBatchPlan =
         arrowBatchPlan != null
@@ -336,6 +461,14 @@ public class LanceScan
     this.precomputedFragmentRowCounts =
         precomputedFragmentRowCounts != null
             ? precomputedFragmentRowCounts
+            : Collections.emptyMap();
+    this.precomputedFragmentPhysicalRows =
+        precomputedFragmentPhysicalRows != null
+            ? precomputedFragmentPhysicalRows
+            : this.precomputedFragmentRowCounts;
+    this.precomputedFragmentProjectedBytes =
+        precomputedFragmentProjectedBytes != null
+            ? precomputedFragmentProjectedBytes
             : Collections.emptyMap();
     this.activeShardingExpression = activeShardingExpression;
     this.activeShardingColumn = activeShardingColumn;
@@ -410,6 +543,8 @@ public class LanceScan
             runtimeFilterAttributes,
             precomputedSplits,
             precomputedFragmentRowCounts,
+            precomputedFragmentPhysicalRows,
+            precomputedFragmentProjectedBytes,
             activeShardingExpression,
             activeShardingColumn,
             fragmentShardingKeys,
@@ -465,6 +600,24 @@ public class LanceScan
       prunedSplits = pruneByLimit(prunedSplits, precomputedFragmentRowCounts);
     }
 
+    if (activeShardingExpression == null
+        && !pushedAggregation.isPresent()
+        && !limit.isPresent()
+        && !offset.isPresent()
+        && !topNSortOrders.isPresent()
+        && (readOptions == null || readOptions.getFullTextQuery() == null)) {
+      Long effectiveSplitBytes = resolveEffectiveSplitBytes(prunedSplits);
+      Long maxRowsPerSplit = readOptions != null ? readOptions.getMaxRowsPerSplit() : null;
+      prunedSplits =
+          LanceSplit.expandSplits(
+              prunedSplits,
+              precomputedFragmentRowCounts,
+              precomputedFragmentPhysicalRows,
+              precomputedFragmentProjectedBytes,
+              effectiveSplitBytes,
+              maxRowsPerSplit);
+    }
+
     // Capture as effectively final for use in lambda
     final List<LanceSplit> finalSplits = prunedSplits;
     final DataType partitionKeyType = partitionKeyDataType();
@@ -508,6 +661,47 @@ public class LanceScan
 
     this.numPartitions = result.length;
     return result;
+  }
+
+  private Long resolveEffectiveSplitBytes(List<LanceSplit> survivingSplits) {
+    if (precomputedFragmentProjectedBytes == null || precomputedFragmentProjectedBytes.isEmpty()) {
+      return null;
+    }
+    long totalSurvivingBytes = 0L;
+    for (LanceSplit split : survivingSplits) {
+      if (!split.hasRowRange() && split.getFragments().size() == 1) {
+        totalSurvivingBytes +=
+            Math.max(
+                0L,
+                precomputedFragmentProjectedBytes.getOrDefault(split.getFragments().get(0), 0L));
+      }
+    }
+    if (totalSurvivingBytes <= 0L) {
+      return null;
+    }
+    SQLConf sqlConf = SQLConf.get();
+    long targetSplitSize =
+        readOptions != null && readOptions.getTargetSplitSize() != null
+            ? readOptions.getTargetSplitSize()
+            : sqlConf.filesMaxPartitionBytes();
+    long openCostInBytes =
+        readOptions != null && readOptions.getOpenCostInBytes() != null
+            ? readOptions.getOpenCostInBytes()
+            : sqlConf.filesOpenCostInBytes();
+    int minPartitionNum = 1;
+    scala.Option<Object> confMinPart = sqlConf.filesMinPartitionNum();
+    if (confMinPart != null && confMinPart.isDefined() && confMinPart.get() instanceof Number) {
+      minPartitionNum = Math.max(1, ((Number) confMinPart.get()).intValue());
+    } else {
+      scala.Option<SparkSession> activeSession = SparkSession.getActiveSession();
+      if (activeSession != null
+          && activeSession.isDefined()
+          && !activeSession.get().sparkContext().isStopped()) {
+        minPartitionNum = Math.max(1, activeSession.get().leafNodeDefaultParallelism());
+      }
+    }
+    return LanceSplit.computeEffectiveSplitBytes(
+        totalSurvivingBytes, targetSplitSize, openCostInBytes, minPartitionNum);
   }
 
   private DataType partitionKeyDataType() {
