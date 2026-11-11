@@ -465,6 +465,24 @@ public class LanceScan
       prunedSplits = pruneByLimit(prunedSplits, precomputedFragmentRowCounts);
     }
 
+    // For unordered, non-sharded scans without LIMIT/OFFSET, schedule larger fragments first
+    // (Longest Processing Time first, matching Spark's FilePartition ordering). Stable sorting
+    // preserves fragment ID order among equal-sized fragments while avoiding tail stragglers when
+    // large compacted or recently appended fragments sit near the end of the manifest.
+    if (activeShardingExpression == null
+        && !limit.isPresent()
+        && !offset.isPresent()
+        && !topNSortOrders.isPresent()
+        && !precomputedFragmentRowCounts.isEmpty()
+        && prunedSplits.size() > 1) {
+      List<LanceSplit> orderedSplits = new java.util.ArrayList<>(prunedSplits);
+      orderedSplits.sort(
+          java.util.Comparator.comparingLong(
+                  (LanceSplit s) -> splitRowCount(s, precomputedFragmentRowCounts))
+              .reversed());
+      prunedSplits = orderedSplits;
+    }
+
     // Capture as effectively final for use in lambda
     final List<LanceSplit> finalSplits = prunedSplits;
     final DataType partitionKeyType = partitionKeyDataType();
@@ -508,6 +526,17 @@ public class LanceScan
 
     this.numPartitions = result.length;
     return result;
+  }
+
+  private static long splitRowCount(LanceSplit split, java.util.Map<Integer, Long> rowCounts) {
+    long total = 0L;
+    for (Integer fragId : split.getFragments()) {
+      Long count = rowCounts.get(fragId);
+      if (count != null && count > 0) {
+        total += count;
+      }
+    }
+    return total;
   }
 
   private DataType partitionKeyDataType() {

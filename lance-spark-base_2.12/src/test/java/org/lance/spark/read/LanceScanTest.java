@@ -434,4 +434,83 @@ public class LanceScanTest {
 
     assertNotEquals(scan1, scan2, "Scans with different schemas should not be equal");
   }
+
+  @Test
+  public void testPlanInputPartitionsOrdersLargestFragmentsFirstWhenUnordered() {
+    java.util.List<LanceSplit> splits =
+        java.util.Arrays.asList(
+            new LanceSplit(Collections.singletonList(0)),
+            new LanceSplit(Collections.singletonList(1)),
+            new LanceSplit(Collections.singletonList(2)),
+            new LanceSplit(Collections.singletonList(3)));
+    Map<Integer, Long> rowCounts = new HashMap<>();
+    rowCounts.put(0, 100L);
+    rowCounts.put(1, 50_000L);
+    rowCounts.put(2, 50_000L);
+    rowCounts.put(3, 1_000_000L);
+
+    LanceScan unorderedScan =
+        new LanceScan(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            null,
+            splits,
+            rowCounts,
+            null,
+            null,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+
+    InputPartition[] planned = unorderedScan.planInputPartitions();
+    assertEquals(4, planned.length);
+    // Largest fragment (3) first, equal-sized fragments (1, 2) preserve relative order, smallest
+    // (0) last.
+    assertEquals(3, ((LanceInputPartition) planned[0]).getLanceSplit().getFragments().get(0));
+    assertEquals(1, ((LanceInputPartition) planned[1]).getLanceSplit().getFragments().get(0));
+    assertEquals(2, ((LanceInputPartition) planned[2]).getLanceSplit().getFragments().get(0));
+    assertEquals(0, ((LanceInputPartition) planned[3]).getLanceSplit().getFragments().get(0));
+
+    // Sharded scans (SPJ / KeyGroupedPartitioning) must preserve their original split ordering.
+    Map<Integer, Object> shardingKeys = new HashMap<>();
+    shardingKeys.put(0, "a");
+    shardingKeys.put(1, "b");
+    shardingKeys.put(2, "c");
+    shardingKeys.put(3, "d");
+    LanceScan shardedScan =
+        new LanceScan(
+            TEST_SCHEMA,
+            TestUtils.TestTable1Config.readOptions,
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            org.lance.spark.utils.Optional.empty(),
+            new Predicate[0],
+            null,
+            null,
+            splits,
+            rowCounts,
+            Expressions.column("region"),
+            shardingKeys,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    InputPartition[] shardedPlanned = shardedScan.planInputPartitions();
+    assertEquals(
+        0, ((LanceInputPartition) shardedPlanned[0]).getLanceSplit().getFragments().get(0));
+    assertEquals(
+        1, ((LanceInputPartition) shardedPlanned[1]).getLanceSplit().getFragments().get(0));
+    assertEquals(
+        2, ((LanceInputPartition) shardedPlanned[2]).getLanceSplit().getFragments().get(0));
+    assertEquals(
+        3, ((LanceInputPartition) shardedPlanned[3]).getLanceSplit().getFragments().get(0));
+  }
 }
