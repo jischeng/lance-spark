@@ -21,6 +21,7 @@ import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.read.LanceSplit;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Utils;
 
@@ -108,8 +109,39 @@ public class LanceFragmentScanner implements AutoCloseable {
       }
 
       scanOptions.columns(projectedColumns);
-      if (inputPartition.getWhereCondition().isPresent()) {
-        scanOptions.filter(inputPartition.getWhereCondition().get());
+      org.lance.spark.utils.Optional<String> rawWhere = inputPartition.getWhereCondition();
+      LanceSplit split = inputPartition.getLanceSplit();
+      if (split != null && split.hasRowRange()) {
+        if (!rawWhere.isPresent() && fragment.metadata().getNumDeletions() == 0L) {
+          scanOptions.offset(split.getStartOffset());
+          long splitLimit =
+              inputPartition.getLimit().isPresent()
+                  ? Math.min(split.getRowCount(), inputPartition.getLimit().get().longValue())
+                  : split.getRowCount();
+          scanOptions.limit(splitLimit);
+        } else {
+          long baseAddr = Integer.toUnsignedLong(fragmentId) << 32;
+          String startAddr = Long.toUnsignedString(baseAddr + split.getStartOffset());
+          String endAddr =
+              Long.toUnsignedString(baseAddr + split.getStartOffset() + split.getRowCount());
+          String slicePred = "(_rowaddr >= " + startAddr + " AND _rowaddr < " + endAddr + ")";
+          String effectiveWhere =
+              rawWhere.isPresent() ? slicePred + " AND (" + rawWhere.get() + ")" : slicePred;
+          scanOptions.filter(effectiveWhere);
+          if (inputPartition.getLimit().isPresent()) {
+            scanOptions.limit(inputPartition.getLimit().get());
+          }
+        }
+      } else {
+        if (rawWhere.isPresent()) {
+          scanOptions.filter(rawWhere.get());
+        }
+        if (inputPartition.getLimit().isPresent()) {
+          scanOptions.limit(inputPartition.getLimit().get());
+        }
+        if (inputPartition.getOffset().isPresent()) {
+          scanOptions.offset(inputPartition.getOffset().get());
+        }
       }
       scanOptions.batchSize(readOptions.getBatchSize());
       if (readOptions.getFullTextQuery() != null) {
@@ -118,12 +150,6 @@ public class LanceFragmentScanner implements AutoCloseable {
         scanOptions.disableScoringAutoprojection(true);
       }
       scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
-      if (inputPartition.getLimit().isPresent()) {
-        scanOptions.limit(inputPartition.getLimit().get());
-      }
-      if (inputPartition.getOffset().isPresent()) {
-        scanOptions.offset(inputPartition.getOffset().get());
-      }
       if (inputPartition.getTopNSortOrders().isPresent()) {
         scanOptions.setColumnOrderings(inputPartition.getTopNSortOrders().get());
       }

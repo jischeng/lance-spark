@@ -356,6 +356,18 @@ public class LanceScanBuilder
             summary.getTotalRows());
       }
 
+      LanceStatistics fullProjectedStatistics =
+          LanceStatistics.estimateProjected(
+              summary.getTotalRows(), summary.getTotalFilesSize(), fullSchema, schema);
+      Map<Integer, Long> fragmentProjectedBytes =
+          LanceSplit.estimateFragmentProjectedBytes(
+              lanceSchema,
+              schema,
+              pushedPredicates,
+              scanPlan.getFragmentDataFiles(),
+              scanPlan.getFragmentRowCounts(),
+              fullProjectedStatistics.sizeInBytes().orElse(0L));
+
       // Plan Arrow batches from the dataset schema already loaded here. A scan that cannot emit
       // them reads as usual, also when the arrow_batch_reads read option asks for them.
       ArrowBatchAdapter.Plan arrowBatchPlan =
@@ -391,6 +403,8 @@ public class LanceScanBuilder
               .toArray(NamedReference[]::new),
           scanPlan.getSplits(),
           scanPlan.getFragmentRowCounts(),
+          scanPlan.getFragmentPhysicalRows(),
+          fragmentProjectedBytes,
           activeShardingExpression,
           activeShardingColumn,
           fragmentShardingKeys,

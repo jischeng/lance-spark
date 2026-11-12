@@ -146,6 +146,30 @@ df.write \
 
 ## Read Performance
 
+### Sub-Fragment Split Sizing
+
+By default, scan planning sizes splits adaptively from the projected on-disk bytes of surviving fragments using the same byte-budget formula as Spark's `FilePartition.maxSplitBytes`:
+
+$$\text{effectiveSplitBytes} = \min\left(\text{target\_split\_size},\ \max\left(\text{open\_cost\_in\_bytes},\ \frac{\text{totalProjectedBytes}}{\text{minPartitionNum}}\right)\right)$$
+
+- `target_split_size`: target byte size per split (defaults to `spark.sql.files.maxPartitionBytes`, `128 MiB`).
+- `open_cost_in_bytes`: estimated byte cost of opening a fragment scanner (defaults to `spark.sql.files.openCostInBytes`, `4 MiB`).
+- `minPartitionNum`: minimum target parallelism from `spark.sql.files.minPartitionNum` or `sparkSession.leafNodeDefaultParallelism`.
+- `max_rows_per_split` (optional): explicit upper bound on logical rows per split for compute-heavy per-row UDF or model-inference scans where CPU/GPU cost dominates projected byte width.
+
+Untouched `.lance` column files are excluded from per-fragment byte estimation, so narrow scalar projections keep whole-fragment splits without task explosion while wide binary, vector, or struct scans automatically subdivide oversized fragments into parallel row-range splits:
+
+```python
+df = spark.read \
+    .format("lance") \
+    .option("target_split_size", "67108864") \
+    .load("/path/to/dataset.lance")
+```
+
+- Unfiltered scans on fragments without deletions push native `offset` / `limit` bounds directly to the fragment scanner.
+- Filtered scans or fragments with deletion vectors push unsigned `_rowaddr` sub-range bounds alongside any pushed predicate, preserving exact row filtering and deletion semantics without duplicating or dropping rows.
+- Ordered, sharded (`KeyGroupedPartitioning`), `LIMIT`, `OFFSET`, full-text search, and pushed aggregation scans automatically keep whole-fragment splits.
+
 ### I/O Threads
 
 Set via environment variable `LANCE_IO_THREADS` (default: 64).
